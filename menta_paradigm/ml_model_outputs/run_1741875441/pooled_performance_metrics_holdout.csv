@@ -1,0 +1,4 @@
+label_combination,best_model,n_samples,samples_imagery,samples_instruction,accuracy,precision_macro,recall_macro,f1_macro,precision_weighted,recall_weighted,f1_weighted,precision_imagery,recall_imagery,f1_imagery,precision_instruction,recall_instruction,f1_instruction,samples_baseline,precision_baseline,recall_baseline,f1_baseline
+instruction_imagery,RandomForest,928,464.0,464.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,,,,
+instruction_baseline,RandomForest,928,,464.0,0.6182795698924731,0.6189534883720931,0.6182795698924731,0.6177381538194344,0.6189534883720931,0.6182795698924731,0.6177381538194344,,,,0.627906976744186,0.5806451612903226,0.6033519553072626,464.0,0.61,0.6559139784946236,0.6321243523316062
+imagery_baseline,SVM,928,464.0,,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,,,,464.0,1.0,1.0,1.0

@@ -1,0 +1,2 @@
+label_combination,best_model,n_samples,samples_baseline,samples_imagery,samples_instruction,accuracy,precision_macro,recall_macro,f1_macro,precision_weighted,recall_weighted,f1_weighted
+instruction_imagery_baseline,RandomForest,1392,464,464,464,0.9080459770114943,0.9156491656491657,0.9080459770114943,0.906917050058813,0.9156491656491655,0.9080459770114943,0.9069170500588131

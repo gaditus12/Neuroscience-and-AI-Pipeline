@@ -1,0 +1,10 @@
+Experimental Main
+-----Data collection------
+    --> Timeseries without any preprocessing
+    --> 250Hz
+    --> windows for imagery is always the same (20s)
+
+Preprocess
+Feature Extractor
+Feature Merger
+Label Differentiator

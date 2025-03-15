@@ -1,0 +1,2 @@
+label_combination,best_model,n_samples,samples_m_et_s,samples_n_3_s,accuracy,precision_macro,recall_macro,f1_macro,precision_weighted,recall_weighted,f1_weighted,precision_m_et_s,recall_m_et_s,f1_m_et_s,precision_n_3_s,recall_n_3_s,f1_n_3_s
+m_et_s_n_3_s,RandomForest,30,15,15,0.4666666666666667,0.4660633484162896,0.4666666666666667,0.4642857142857143,0.4660633484162896,0.4666666666666667,0.46428571428571425,0.47058823529411764,0.5333333333333333,0.5,0.46153846153846156,0.4,0.42857142857142855

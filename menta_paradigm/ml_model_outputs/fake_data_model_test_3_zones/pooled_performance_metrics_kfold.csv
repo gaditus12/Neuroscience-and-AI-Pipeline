@@ -1,0 +1,2 @@
+label_combination,best_model,n_samples,samples_baseline,samples_imagery,samples_instruction,accuracy,precision_macro,recall_macro,f1_macro,precision_weighted,recall_weighted,f1_weighted
+instruction_imagery_baseline,SVM,1392,464,464,464,0.3024425287356322,0.3012473272253251,0.3024425287356322,0.3001268837331955,0.30124732722532516,0.3024425287356322,0.3001268837331955

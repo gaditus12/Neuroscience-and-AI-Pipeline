@@ -1,0 +1,2 @@
+label_combination,best_model,n_samples,samples_m_et_s,samples_n_3_s,accuracy,precision_macro,recall_macro,f1_macro,precision_weighted,recall_weighted,f1_weighted,precision_m_et_s,recall_m_et_s,f1_m_et_s,precision_n_3_s,recall_n_3_s,f1_n_3_s
+m_et_s_n_3_s,SVM,30,15,15,0.6,0.6018099547511313,0.6,0.5982142857142857,0.6018099547511312,0.6,0.5982142857142857,0.5882352941176471,0.6666666666666666,0.625,0.6153846153846154,0.5333333333333333,0.5714285714285714

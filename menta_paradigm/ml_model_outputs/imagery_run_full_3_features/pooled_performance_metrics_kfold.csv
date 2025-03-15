@@ -1,0 +1,2 @@
+label_combination,best_model,n_samples,samples_a_c_b,samples_a_pu_b,samples_b_m_b,samples_i_sg_b,samples_m_et_s,samples_m_gp_s,samples_n_3_s,samples_o_sq_s,samples_p_af_b,samples_p_af_s,samples_p_sf_b,samples_p_sf_s,accuracy,precision_macro,recall_macro,f1_macro,precision_weighted,recall_weighted,f1_weighted
+m_et_s_p_af_b_p_af_s_p_sf_b_p_sf_s_a_c_b_a_pu_b_b_m_b_i_sg_b_m_gp_s_n_3_s_o_sq_s,RandomForest,464,24,24,24,24,40,24,24,24,56,56,88,56,0.3125,0.2786943166931641,0.2404491341991342,0.24424661102607806,0.39507297879186315,0.3125,0.3357901737480371

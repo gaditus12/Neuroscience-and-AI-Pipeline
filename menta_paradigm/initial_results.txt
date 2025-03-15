@@ -1,0 +1,291 @@
+The 2 most diverse labels are: ('n_3_s', 'p_af_s')
+Separation Score: 0.9167
+Best model: RandomForest
+Sample counts: 48 total samples
+
+
+
+
+Finding most separable label combinations...
+Label combination ('a_c_b', 'a_pu_b'): 48 samples
+  Per label: {'a_c_b': 24, 'a_pu_b': 24}
+  RandomForest accuracy: 0.6458
+  SVM accuracy: 0.5000
+Label combination ('a_c_b', 'b_m_b'): 48 samples
+  Per label: {'a_c_b': 24, 'b_m_b': 24}
+  RandomForest accuracy: 0.7083
+  SVM accuracy: 0.7500
+Label combination ('a_c_b', 'i_sg_b'): 48 samples
+  Per label: {'a_c_b': 24, 'i_sg_b': 24}
+  RandomForest accuracy: 0.6458
+  SVM accuracy: 0.7500
+Label combination ('a_c_b', 'm_et_s'): 48 samples
+  Per label: {'a_c_b': 24, 'm_et_s': 24}
+  RandomForest accuracy: 0.8125
+  SVM accuracy: 0.6875
+Label combination ('a_c_b', 'm_gp_s'): 48 samples
+  Per label: {'a_c_b': 24, 'm_gp_s': 24}
+  RandomForest accuracy: 0.6458
+  SVM accuracy: 0.6042
+Label combination ('a_c_b', 'n_3_s'): 48 samples
+  Per label: {'a_c_b': 24, 'n_3_s': 24}
+  RandomForest accuracy: 0.8542
+  SVM accuracy: 0.6042
+Label combination ('a_c_b', 'o_sq_s'): 48 samples
+  Per label: {'a_c_b': 24, 'o_sq_s': 24}
+  RandomForest accuracy: 0.6875
+  SVM accuracy: 0.5833
+Label combination ('a_c_b', 'p_af_b'): 48 samples
+  Per label: {'a_c_b': 24, 'p_af_b': 24}
+  RandomForest accuracy: 0.6667
+  SVM accuracy: 0.6042
+Label combination ('a_c_b', 'p_af_s'): 48 samples
+  Per label: {'a_c_b': 24, 'p_af_s': 24}
+  RandomForest accuracy: 0.8750
+  SVM accuracy: 0.7917
+Label combination ('a_c_b', 'p_sf_b'): 48 samples
+  Per label: {'a_c_b': 24, 'p_sf_b': 24}
+  RandomForest accuracy: 0.7083
+  SVM accuracy: 0.5833
+Label combination ('a_c_b', 'p_sf_s'): 48 samples
+  Per label: {'a_c_b': 24, 'p_sf_s': 24}
+  RandomForest accuracy: 0.6667
+  SVM accuracy: 0.7500
+Label combination ('a_pu_b', 'b_m_b'): 48 samples
+  Per label: {'a_pu_b': 24, 'b_m_b': 24}
+  RandomForest accuracy: 0.7292
+  SVM accuracy: 0.5625
+Label combination ('a_pu_b', 'i_sg_b'): 48 samples
+  Per label: {'a_pu_b': 24, 'i_sg_b': 24}
+  RandomForest accuracy: 0.6042
+  SVM accuracy: 0.6875
+Label combination ('a_pu_b', 'm_et_s'): 48 samples
+  Per label: {'a_pu_b': 24, 'm_et_s': 24}
+  RandomForest accuracy: 0.7292
+  SVM accuracy: 0.7708
+Label combination ('a_pu_b', 'm_gp_s'): 48 samples
+  Per label: {'a_pu_b': 24, 'm_gp_s': 24}
+  RandomForest accuracy: 0.6667
+  SVM accuracy: 0.6667
+Label combination ('a_pu_b', 'n_3_s'): 48 samples
+  Per label: {'a_pu_b': 24, 'n_3_s': 24}
+  RandomForest accuracy: 0.7500
+  SVM accuracy: 0.6042
+Label combination ('a_pu_b', 'o_sq_s'): 48 samples
+  Per label: {'a_pu_b': 24, 'o_sq_s': 24}
+  RandomForest accuracy: 0.6875
+  SVM accuracy: 0.6875
+Label combination ('a_pu_b', 'p_af_b'): 48 samples
+  Per label: {'a_pu_b': 24, 'p_af_b': 24}
+  RandomForest accuracy: 0.6667
+  SVM accuracy: 0.5625
+Label combination ('a_pu_b', 'p_af_s'): 48 samples
+  Per label: {'a_pu_b': 24, 'p_af_s': 24}
+  RandomForest accuracy: 0.7500
+  SVM accuracy: 0.6667
+Label combination ('a_pu_b', 'p_sf_b'): 48 samples
+  Per label: {'a_pu_b': 24, 'p_sf_b': 24}
+  RandomForest accuracy: 0.6250
+  SVM accuracy: 0.5625
+Label combination ('a_pu_b', 'p_sf_s'): 48 samples
+  Per label: {'a_pu_b': 24, 'p_sf_s': 24}
+  RandomForest accuracy: 0.6042
+  SVM accuracy: 0.6667
+Label combination ('b_m_b', 'i_sg_b'): 48 samples
+  Per label: {'b_m_b': 24, 'i_sg_b': 24}
+  RandomForest accuracy: 0.7500
+  SVM accuracy: 0.8333
+Label combination ('b_m_b', 'm_et_s'): 48 samples
+  Per label: {'b_m_b': 24, 'm_et_s': 24}
+  RandomForest accuracy: 0.8750
+  SVM accuracy: 0.8333
+Label combination ('b_m_b', 'm_gp_s'): 48 samples
+  Per label: {'b_m_b': 24, 'm_gp_s': 24}
+  RandomForest accuracy: 0.5833
+  SVM accuracy: 0.5625
+Label combination ('b_m_b', 'n_3_s'): 48 samples
+  Per label: {'b_m_b': 24, 'n_3_s': 24}
+  RandomForest accuracy: 0.7500
+  SVM accuracy: 0.7083
+Label combination ('b_m_b', 'o_sq_s'): 48 samples
+  Per label: {'b_m_b': 24, 'o_sq_s': 24}
+  RandomForest accuracy: 0.7917
+  SVM accuracy: 0.7292
+Label combination ('b_m_b', 'p_af_b'): 48 samples
+  Per label: {'b_m_b': 24, 'p_af_b': 24}
+  RandomForest accuracy: 0.6875
+  SVM accuracy: 0.7708
+Label combination ('b_m_b', 'p_af_s'): 48 samples
+  Per label: {'b_m_b': 24, 'p_af_s': 24}
+  RandomForest accuracy: 0.8542
+  SVM accuracy: 0.7708
+Label combination ('b_m_b', 'p_sf_b'): 48 samples
+  Per label: {'b_m_b': 24, 'p_sf_b': 24}
+  RandomForest accuracy: 0.6042
+  SVM accuracy: 0.6250
+Label combination ('b_m_b', 'p_sf_s'): 48 samples
+  Per label: {'b_m_b': 24, 'p_sf_s': 24}
+  RandomForest accuracy: 0.7292
+  SVM accuracy: 0.7292
+Label combination ('i_sg_b', 'm_et_s'): 48 samples
+  Per label: {'i_sg_b': 24, 'm_et_s': 24}
+  RandomForest accuracy: 0.7708
+  SVM accuracy: 0.8125
+Label combination ('i_sg_b', 'm_gp_s'): 48 samples
+  Per label: {'i_sg_b': 24, 'm_gp_s': 24}
+  RandomForest accuracy: 0.7292
+  SVM accuracy: 0.8125
+Label combination ('i_sg_b', 'n_3_s'): 48 samples
+  Per label: {'i_sg_b': 24, 'n_3_s': 24}
+  RandomForest accuracy: 0.7292
+  SVM accuracy: 0.6875
+Label combination ('i_sg_b', 'o_sq_s'): 48 samples
+  Per label: {'i_sg_b': 24, 'o_sq_s': 24}
+  RandomForest accuracy: 0.8750
+  SVM accuracy: 0.8750
+Label combination ('i_sg_b', 'p_af_b'): 48 samples
+  Per label: {'i_sg_b': 24, 'p_af_b': 24}
+  RandomForest accuracy: 0.6042
+  SVM accuracy: 0.6250
+Label combination ('i_sg_b', 'p_af_s'): 48 samples
+  Per label: {'i_sg_b': 24, 'p_af_s': 24}
+  RandomForest accuracy: 0.6667
+  SVM accuracy: 0.6875
+Label combination ('i_sg_b', 'p_sf_b'): 48 samples
+  Per label: {'i_sg_b': 24, 'p_sf_b': 24}
+  RandomForest accuracy: 0.7292
+  SVM accuracy: 0.7708
+Label combination ('i_sg_b', 'p_sf_s'): 48 samples
+  Per label: {'i_sg_b': 24, 'p_sf_s': 24}
+  RandomForest accuracy: 0.7083
+  SVM accuracy: 0.5625
+Label combination ('m_et_s', 'm_gp_s'): 48 samples
+  Per label: {'m_et_s': 24, 'm_gp_s': 24}
+  RandomForest accuracy: 0.8125
+  SVM accuracy: 0.8750
+Label combination ('m_et_s', 'n_3_s'): 48 samples
+  Per label: {'m_et_s': 24, 'n_3_s': 24}
+  RandomForest accuracy: 0.8750
+  SVM accuracy: 0.8750
+Label combination ('m_et_s', 'o_sq_s'): 48 samples
+  Per label: {'m_et_s': 24, 'o_sq_s': 24}
+  RandomForest accuracy: 0.7292
+  SVM accuracy: 0.8750
+Label combination ('m_et_s', 'p_af_b'): 48 samples
+  Per label: {'m_et_s': 24, 'p_af_b': 24}
+  RandomForest accuracy: 0.7083
+  SVM accuracy: 0.8333
+Label combination ('m_et_s', 'p_af_s'): 48 samples
+  Per label: {'m_et_s': 24, 'p_af_s': 24}
+  RandomForest accuracy: 0.7708
+  SVM accuracy: 0.7083
+Label combination ('m_et_s', 'p_sf_b'): 48 samples
+  Per label: {'m_et_s': 24, 'p_sf_b': 24}
+  RandomForest accuracy: 0.8542
+  SVM accuracy: 0.7917
+Label combination ('m_et_s', 'p_sf_s'): 48 samples
+  Per label: {'m_et_s': 24, 'p_sf_s': 24}
+  RandomForest accuracy: 0.7708
+  SVM accuracy: 0.7292
+Label combination ('m_gp_s', 'n_3_s'): 48 samples
+  Per label: {'m_gp_s': 24, 'n_3_s': 24}
+  RandomForest accuracy: 0.5833
+  SVM accuracy: 0.5208
+Label combination ('m_gp_s', 'o_sq_s'): 48 samples
+  Per label: {'m_gp_s': 24, 'o_sq_s': 24}
+  RandomForest accuracy: 0.6667
+  SVM accuracy: 0.6667
+Label combination ('m_gp_s', 'p_af_b'): 48 samples
+  Per label: {'m_gp_s': 24, 'p_af_b': 24}
+  RandomForest accuracy: 0.6875
+  SVM accuracy: 0.5625
+Label combination ('m_gp_s', 'p_af_s'): 48 samples
+  Per label: {'m_gp_s': 24, 'p_af_s': 24}
+  RandomForest accuracy: 0.8125
+  SVM accuracy: 0.7708
+Label combination ('m_gp_s', 'p_sf_b'): 48 samples
+  Per label: {'m_gp_s': 24, 'p_sf_b': 24}
+  RandomForest accuracy: 0.5833
+  SVM accuracy: 0.5833
+Label combination ('m_gp_s', 'p_sf_s'): 48 samples
+  Per label: {'m_gp_s': 24, 'p_sf_s': 24}
+  RandomForest accuracy: 0.5000
+  SVM accuracy: 0.6458
+Label combination ('n_3_s', 'o_sq_s'): 48 samples
+  Per label: {'n_3_s': 24, 'o_sq_s': 24}
+  RandomForest accuracy: 0.8958
+  SVM accuracy: 0.7083
+Label combination ('n_3_s', 'p_af_b'): 48 samples
+  Per label: {'n_3_s': 24, 'p_af_b': 24}
+  RandomForest accuracy: 0.6875
+  SVM accuracy: 0.6458
+Label combination ('n_3_s', 'p_af_s'): 48 samples
+  Per label: {'n_3_s': 24, 'p_af_s': 24}
+  RandomForest accuracy: 0.9167
+  SVM accuracy: 0.8542
+Label combination ('n_3_s', 'p_sf_b'): 48 samples
+  Per label: {'n_3_s': 24, 'p_sf_b': 24}
+  RandomForest accuracy: 0.8333
+  SVM accuracy: 0.8333
+Label combination ('n_3_s', 'p_sf_s'): 48 samples
+  Per label: {'n_3_s': 24, 'p_sf_s': 24}
+  RandomForest accuracy: 0.5417
+  SVM accuracy: 0.4375
+Label combination ('o_sq_s', 'p_af_b'): 48 samples
+  Per label: {'o_sq_s': 24, 'p_af_b': 24}
+  RandomForest accuracy: 0.5833
+  SVM accuracy: 0.6458
+Label combination ('o_sq_s', 'p_af_s'): 48 samples
+  Per label: {'o_sq_s': 24, 'p_af_s': 24}
+  RandomForest accuracy: 0.8125
+  SVM accuracy: 0.8750
+Label combination ('o_sq_s', 'p_sf_b'): 48 samples
+  Per label: {'o_sq_s': 24, 'p_sf_b': 24}
+  RandomForest accuracy: 0.7708
+  SVM accuracy: 0.7500
+Label combination ('o_sq_s', 'p_sf_s'): 48 samples
+  Per label: {'o_sq_s': 24, 'p_sf_s': 24}
+  RandomForest accuracy: 0.6875
+  SVM accuracy: 0.6875
+Label combination ('p_af_b', 'p_af_s'): 48 samples
+  Per label: {'p_af_b': 24, 'p_af_s': 24}
+  RandomForest accuracy: 0.6458
+  SVM accuracy: 0.7708
+Label combination ('p_af_b', 'p_sf_b'): 48 samples
+  Per label: {'p_af_b': 24, 'p_sf_b': 24}
+  RandomForest accuracy: 0.7708
+  SVM accuracy: 0.6667
+Label combination ('p_af_b', 'p_sf_s'): 48 samples
+  Per label: {'p_af_b': 24, 'p_sf_s': 24}
+  RandomForest accuracy: 0.6667
+  SVM accuracy: 0.6458
+Label combination ('p_af_s', 'p_sf_b'): 48 samples
+  Per label: {'p_af_s': 24, 'p_sf_b': 24}
+  RandomForest accuracy: 0.8542
+  SVM accuracy: 0.8125
+Label combination ('p_af_s', 'p_sf_s'): 48 samples
+  Per label: {'p_af_s': 24, 'p_sf_s': 24}
+  RandomForest accuracy: 0.6458
+  SVM accuracy: 0.6875
+Label combination ('p_sf_b', 'p_sf_s'): 48 samples
+  Per label: {'p_sf_b': 24, 'p_sf_s': 24}
+  RandomForest accuracy: 0.7500
+  SVM accuracy: 0.7500
+
+The 2 most diverse labels are: ('n_3_s', 'p_af_s')
+Separation Score: 0.9167
+Best model: RandomForest
+
+Label combination ('n_3_s', 'p_af_s'): 48 samples
+  Per label: {'n_3_s': 24, 'p_af_s': 24}
+  RandomForest accuracy: 0.9167
+  SVM accuracy: 0.8542
+
+Label combination ('m_et_s', 'n_3_s'): 48 samples
+  Per label: {'m_et_s': 24, 'n_3_s': 24}
+  RandomForest accuracy: 0.8750
+  SVM accuracy: 0.8750
+Label combination ('m_et_s', 'o_sq_s'): 48 samples
+  Per label: {'m_et_s': 24, 'o_sq_s': 24}
+  RandomForest accuracy: 0.7292
+  SVM accuracy: 0.8750
