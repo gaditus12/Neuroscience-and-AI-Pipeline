@@ -100,23 +100,46 @@ class DataVisualizer:
         print(f"Feature distribution plot saved as: {self.feature_output_file}")
         plt.close()
 
+    def save_top_features(self):
+        with open (f"top_features_box_plots/{self.top_n_features}_features_{self.features_file.split('.csv')[0].split('/')[-1]+'.txt'}", 'w') as f:
+            for i in self.top_features:
+                f.write(f'{i}\n')
+
     def run_all(self):
         """Execute all steps: load data, rank features, and generate plots."""
         self.load_data()
         self.rank_features()
         self.plot_label_distribution()
         self.plot_feature_distribution()
-
+        self.save_top_features()
 
 # Example usage:
 if __name__ == "__main__":
-    visualizer = DataVisualizer(
-        features_file="data/merged_features/golden_plussolo_plus_3_labels_7_captures/13_balanced_3_labels_only_temporal.csv",
-        #feature_ranking_file="data/merged_features/merge_run_1741541389/imagery_task_feature_ranking.csv",
-        feature_ranking_file=None,
-        # Set to None for dynamic ranking
-        top_n_features=5,
-        feature_output_file="feature_distributions.png",
-        label_output_file="label_distribution.png"
-    )
-    visualizer.run_all()
+    features_file_dir = "data/merged_features/32_captures/"
+    multiple=True
+    if multiple:
+        for i in range (1, 5):
+            features_file=features_file_dir+ f"o1_sess_{i}.csv"
+            top_n_features = 10
+            visualizer = DataVisualizer(
+                features_file=features_file,
+                #feature_ranking_file="data/merged_features/merge_run_1741541389/imagery_task_feature_ranking.csv",
+                feature_ranking_file=None,
+                # Set to None for dynamic ranking
+                top_n_features=top_n_features,
+                feature_output_file=f"top_features_box_plots/{top_n_features}_feature_distributions_{features_file.split('.csv')[0].split('/')[-1]}.png",
+                label_output_file=f"top_features_box_plots/{top_n_features}_label_distribution_{features_file.split('.csv')[0].split('/')[-1]}.png"
+            )
+            visualizer.run_all()
+    else:
+        features_file = features_file_dir + f"o1_sessions_2_3_7.csv"
+        visualizer = DataVisualizer(
+            features_file=features_file,
+            # feature_ranking_file="data/merged_features/merge_run_1741541389/imagery_task_feature_ranking.csv",
+            feature_ranking_file=None,
+            # Set to None for dynamic ranking
+            top_n_features=10,
+            feature_output_file=f"top_features_box_plots/feature_distributions_{features_file.split('.csv')[0].split('/')[-1]}.png",
+            label_output_file=f"top_features_box_plots/label_distribution_{features_file.split('.csv')[0].split('/')[-1]}.png"
+        )
+        visualizer.run_all()

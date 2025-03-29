@@ -1,16 +1,9 @@
 import os
 import time
 
-import pandas as pd
-import numpy as np
 from itertools import combinations
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.svm import SVC
-from sklearn.model_selection import LeaveOneOut, cross_val_score, StratifiedKFold, train_test_split
-from sklearn.preprocessing import StandardScaler
+
 from sklearn.decomposition import PCA
-from sklearn.feature_selection import SelectKBest, f_classif
-from sklearn.metrics import precision_recall_fscore_support, confusion_matrix, classification_report
 import matplotlib
 
 matplotlib.use('Agg')
@@ -28,6 +21,7 @@ import seaborn as sns
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.svm import SVC
 from sklearn.model_selection import LeaveOneOut, cross_val_score, StratifiedKFold, train_test_split
+from sklearn.feature_selection import SelectKBest, f_classif, mutual_info_classif
 from sklearn.preprocessing import StandardScaler
 from sklearn.feature_selection import SelectKBest, f_classif
 from sklearn.metrics import precision_recall_fscore_support, confusion_matrix, classification_report
@@ -48,6 +42,7 @@ class EEGAnalyzer:
                  n_features_to_select=15,
                  channel_approach="pooled",  # Options: "pooled", "separate", "features"
                  cv_method="loo",  # Options: "loo", "kfold", "holdout"
+                 cv_version='extended', #extended or simple with a simple feature selection
                  kfold_splits=5,
                  test_size=0.2):  # For holdout validation
         # Configuration
@@ -56,6 +51,7 @@ class EEGAnalyzer:
         self.n_features_to_select = n_features_to_select
         self.channel_approach = channel_approach.lower()
         self.cv_method = cv_method.lower()
+        self.cv_version = cv_version.lower()
         self.kfold_splits = kfold_splits
         self.test_size = test_size
 
@@ -225,11 +221,17 @@ class EEGAnalyzer:
         if self.cv_method == "loo":
             print("Using Leave-One-Out cross validation")
             cv = LeaveOneOut()
-            cv_method = self._evaluate_with_cv
+            if self.cv_version=='simple':
+                cv_method=self._evaluate_with_cv
+            elif self.cv_version=='extended':
+                cv_method=self._evaluate_with_cv_extended
         elif self.cv_method == "kfold":
             print(f"Using Stratified K-Fold cross validation with {self.kfold_splits} splits")
             cv = StratifiedKFold(n_splits=self.kfold_splits)
-            cv_method = self._evaluate_with_cv
+            if self.cv_version=='simple':
+                cv_method=self._evaluate_with_cv
+            elif self.cv_version=='extended':
+                cv_method=self._evaluate_with_cv_extended
         elif self.cv_method == "holdout":
             print(f"Using holdout validation with test_size={self.test_size}")
             cv = None
@@ -341,6 +343,307 @@ class EEGAnalyzer:
             print(classification_report(y_true_all, y_pred_all))
 
         return results
+
+    def _evaluate_with_cv_extended(self, X, y, models, cv):
+        """
+        Evaluate models with cross-validation using ensemble feature selection
+
+        Args:
+            X: Feature matrix
+            y: Target labels
+            models: Dictionary of models to evaluate
+            cv: Cross-validation splitter
+
+        Returns:
+            dict: Results including metrics, confusion matrices, and misclassified samples
+        """
+        results = {'model_metrics': {}, 'confusion_matrices': {}, 'misclassified_samples': {}, 'feature_importance': {}}
+
+        # Convert X to numpy array if it's not already (for easier indexing)
+        X_array = X if isinstance(X, np.ndarray) else X.values
+        X_df = X if isinstance(X, pd.DataFrame) else pd.DataFrame(X)
+
+        # Track which features were selected in each fold for analysis
+        feature_selection_frequency = {col: 0 for col in X_df.columns}
+
+        for name, model in models.items():
+            y_true_all = []
+            y_pred_all = []
+            misclassified_samples = []
+            fold_importances = []
+
+            # Perform cross-validation
+            for fold_idx, (train_idx, test_idx) in enumerate(cv.split(X_array, y)):
+                # Get indices for this fold
+                X_train, X_test = X_array[train_idx], X_array[test_idx]
+                y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
+                test_indices = y.iloc[test_idx].index.tolist()
+
+                # Convert train data to DataFrame for feature selection
+                X_train_df = pd.DataFrame(X_train, columns=X_df.columns)
+
+                # Create temporary DataFrame with required structure for importance methods
+                temp_df = X_train_df.copy()
+                temp_df['label'] = y_train.values
+                temp_df['channel'] = 'combined'  # Placeholder
+                temp_df['session'] = 0  # Placeholder
+
+                # Calculate feature importance using multiple methods
+                anova_importance = self.calculate_anova_importance(temp_df)
+                mi_importance = self.calculate_mutual_info_importance(temp_df)
+                rf_importance = self.calculate_random_forest_importance(temp_df)
+
+                # Combine importance scores
+                ensemble_importance = self.calculate_ensemble_importance(
+                    anova_importance, mi_importance, rf_importance
+                )
+
+                # Store feature importance for this fold
+                fold_importances.append(ensemble_importance)
+
+                # Get the top N features
+                top_features = ensemble_importance['feature'].head(self.n_features_to_select).tolist()
+
+                # Update selection frequency
+                for feature in top_features:
+                    feature_selection_frequency[feature] += 1
+
+                # Scale the data
+                scaler = StandardScaler()
+                X_train_scaled = scaler.fit_transform(X_train)
+                X_test_scaled = scaler.transform(X_test)
+
+                # Select the identified top features
+                X_train_selected = X_train_scaled[:, [list(X_df.columns).index(feat) for feat in top_features]]
+                X_test_selected = X_test_scaled[:, [list(X_df.columns).index(feat) for feat in top_features]]
+
+                # Train model on this fold's training data
+                model.fit(X_train_selected, y_train)
+                y_pred = model.predict(X_test_selected)
+
+                y_true_all.extend(y_test.tolist())
+                y_pred_all.extend(y_pred)
+
+                # Record misclassified samples
+                for idx, true_val, pred_val in zip(test_indices, y_test.tolist(), y_pred):
+                    if true_val != pred_val:
+                        misclassified_samples.append({
+                            'index': idx,
+                            'true_label': true_val,
+                            'predicted_label': pred_val,
+                            'fold': fold_idx
+                        })
+
+            # Aggregate feature importance across folds
+            all_features = set()
+            for fold_importance in fold_importances:
+                all_features.update(fold_importance['feature'].tolist())
+
+            # Create overall feature importance by averaging across folds
+            overall_importance = []
+            for feature in all_features:
+                scores = [fold_imp.loc[fold_imp['feature'] == feature, 'ensemble_score'].values[0]
+                          for fold_imp in fold_importances
+                          if feature in fold_imp['feature'].values]
+
+                overall_importance.append({
+                    'feature': feature,
+                    'avg_ensemble_score': sum(scores) / len(scores),
+                    'selection_frequency': feature_selection_frequency[feature] / len(fold_importances)
+                })
+
+            # Sort by average importance
+            overall_importance_df = pd.DataFrame(overall_importance)
+            overall_importance_df = overall_importance_df.sort_values('avg_ensemble_score', ascending=False)
+
+            # Calculate metrics on all predictions
+            results['model_metrics'][name] = self._calculate_metrics(y_true_all, y_pred_all)
+            results['confusion_matrices'][name] = confusion_matrix(y_true_all, y_pred_all)
+            results['misclassified_samples'][name] = misclassified_samples
+            results['feature_importance'][name] = overall_importance_df
+
+            print(f"\n{name} Classification Report:")
+            print(classification_report(y_true_all, y_pred_all))
+
+            # Print top features by average importance
+            print(f"\nTop {min(10, len(overall_importance_df))} Features:")
+            for i, (_, row) in enumerate(overall_importance_df.head(10).iterrows()):
+                print(f"{i + 1}. {row['feature']} - Score: {row['avg_ensemble_score']:.4f}, " +
+                      f"Selected in {int(row['selection_frequency'] * len(fold_importances))}/{len(fold_importances)} folds")
+
+        return results
+
+
+    def calculate_anova_importance(self, df):
+        """
+        Calculate feature importance using ANOVA F-value (univariate feature selection).
+
+        Args:
+            df (pd.DataFrame): Input dataframe with features and labels
+
+        Returns:
+            pd.DataFrame: Dataframe with feature names and importance scores
+        """
+        # Prepare data
+        X = df.drop(['label', 'channel', 'session'], axis=1)
+        y = df['label']
+
+        # Calculate ANOVA F-values
+        selector = SelectKBest(score_func=f_classif, k='all')
+        selector.fit(X, y)
+
+        # Create importance dataframe
+        importance_df = pd.DataFrame({
+            'feature': X.columns,
+            'f_value': selector.scores_,
+            'p_value': selector.pvalues_
+        })
+
+        # Sort by importance (higher F-value = more important)
+        importance_df = importance_df.sort_values('f_value', ascending=False).reset_index(drop=True)
+
+        # Add normalized importance (0-100 scale)
+        if importance_df['f_value'].max() > 0:
+            importance_df['importance'] = 100.0 * importance_df['f_value'] / importance_df['f_value'].max()
+        else:
+            importance_df['importance'] = 0
+
+        return importance_df
+
+    def calculate_mutual_info_importance(self, df):
+        """
+        Calculate feature importance using mutual information.
+
+        Args:
+            df (pd.DataFrame): Input dataframe with features and labels
+
+        Returns:
+            pd.DataFrame: Dataframe with feature names and importance scores
+        """
+        # Prepare data
+        X = df.drop(['label', 'channel', 'session'], axis=1)
+        y = df['label']
+
+        # Scale features (recommended for mutual information)
+        scaler = StandardScaler()
+        X_scaled = scaler.fit_transform(X)
+
+        # Calculate mutual information
+        mi_scores = mutual_info_classif(X_scaled, y, random_state=42)
+
+        # Create importance dataframe
+        importance_df = pd.DataFrame({
+            'feature': X.columns,
+            'mutual_info': mi_scores
+        })
+
+        # Sort by importance (higher MI = more important)
+        importance_df = importance_df.sort_values('mutual_info', ascending=False).reset_index(drop=True)
+
+        # Add normalized importance (0-100 scale)
+        if importance_df['mutual_info'].max() > 0:
+            importance_df['importance'] = 100.0 * importance_df['mutual_info'] / importance_df['mutual_info'].max()
+        else:
+            importance_df['importance'] = 0
+
+        return importance_df
+
+    def calculate_random_forest_importance(self, df):
+        """
+        Calculate feature importance using Random Forest.
+
+        Args:
+            df (pd.DataFrame): Input dataframe with features and labels
+
+        Returns:
+            pd.DataFrame: Dataframe with feature names and importance scores
+        """
+        # Prepare data
+        X = df.drop(['label', 'channel', 'session'], axis=1)
+        y = df['label']
+
+        # Train Random Forest
+        rf = RandomForestClassifier(n_estimators=100, random_state=42, n_jobs=-1)
+        rf.fit(X, y)
+
+        # Get feature importances
+        importances = rf.feature_importances_
+
+        # Create importance dataframe
+        importance_df = pd.DataFrame({
+            'feature': X.columns,
+            'rf_importance': importances
+        })
+
+        # Sort by importance (higher = more important)
+        importance_df = importance_df.sort_values('rf_importance', ascending=False).reset_index(drop=True)
+
+        # Add normalized importance (0-100 scale)
+        importance_df['importance'] = 100.0 * importance_df['rf_importance'] / importance_df['rf_importance'].max()
+
+        return importance_df
+
+    def calculate_ensemble_importance(self, anova_df, mi_df, rf_df):
+        """
+        Calculate ensemble importance by combining multiple methods.
+
+        Args:
+            anova_df (pd.DataFrame): ANOVA importance dataframe
+            mi_df (pd.DataFrame): Mutual information importance dataframe
+            rf_df (pd.DataFrame): Random forest importance dataframe
+
+        Returns:
+            pd.DataFrame: Dataframe with feature names and ensemble importance scores
+        """
+        # Normalize individual method scores to 0-1 scale
+        anova_norm = anova_df.copy()
+        anova_norm['norm_score'] = anova_norm['importance'] / 100.0
+
+        mi_norm = mi_df.copy()
+        mi_norm['norm_score'] = mi_norm['importance'] / 100.0
+
+        rf_norm = rf_df.copy()
+        rf_norm['norm_score'] = rf_norm['importance'] / 100.0
+
+        # Create mappings of feature to normalized score
+        anova_map = dict(zip(anova_norm['feature'], anova_norm['norm_score']))
+        mi_map = dict(zip(mi_norm['feature'], mi_norm['norm_score']))
+        rf_map = dict(zip(rf_norm['feature'], rf_norm['norm_score']))
+
+        # Get all features
+        all_features = set(anova_map.keys()) | set(mi_map.keys()) | set(rf_map.keys())
+
+        # Create ensemble scores
+        ensemble_data = []
+        for feature in all_features:
+            # Get score from each method (default to 0 if not available)
+            anova_score = anova_map.get(feature, 0.0)
+            mi_score = mi_map.get(feature, 0.0)
+            rf_score = rf_map.get(feature, 0.0)
+
+            # Calculate ensemble score (weighted average)
+            # Weights can be adjusted based on which method you trust more
+            ensemble_score = (0.3 * anova_score + 0.3 * mi_score + 0.4 * rf_score)
+
+            ensemble_data.append({
+                'feature': feature,
+                'anova_score': anova_score,
+                'mi_score': mi_score,
+                'rf_score': rf_score,
+                'ensemble_score': ensemble_score
+            })
+
+        # Create dataframe and sort by ensemble score
+        ensemble_df = pd.DataFrame(ensemble_data)
+        ensemble_df = ensemble_df.sort_values('ensemble_score', ascending=False).reset_index(drop=True)
+
+        # Add normalized importance (0-100 scale)
+        if ensemble_df['ensemble_score'].max() > 0:
+            ensemble_df['importance'] = 100.0 * ensemble_df['ensemble_score'] / ensemble_df['ensemble_score'].max()
+        else:
+            ensemble_df['importance'] = 0
+
+        return ensemble_df
 
     def _evaluate_with_holdout(self, X, y, models, _):
         """Evaluate models with holdout validation - fixed to avoid information leaks"""
@@ -1201,7 +1504,7 @@ class EEGAnalyzer:
         # Define base models with original parameters
         models = {
             'RandomForest': RandomForestClassifier(
-                n_estimators=100,
+                n_estimators=60,
                 max_depth=5,
                 class_weight='balanced',
                 random_state=42
@@ -1290,11 +1593,11 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description='EEG Data Analysis Tool')
-    parser.add_argument('--features_file', type=str, default="data/merged_features/golden_plussolo_plus_7_captures_plus_4_captures/2_labels_21_captures_o1.csv",
+    parser.add_argument('--features_file', type=str, default="data/merged_features/32_captures/o1.csv",
                         help='Path to the CSV file containing EEG features')
     parser.add_argument('--top_n_labels', type=int, default=2,
                         help='Number of labels to analyze (default: 2)')
-    parser.add_argument('--n_features', type=int, default=3,
+    parser.add_argument('--n_features', type=int, default=5,
                         help='Number of top features to select (default: 8)')
     parser.add_argument('--channel_approach', type=str, default="pooled",
                         choices=["pooled", "separate", "features"],
@@ -1302,13 +1605,14 @@ if __name__ == "__main__":
     parser.add_argument('--cv_method', type=str, default="loo",
                         choices=["loo", "kfold", "holdout"],
                         help='Cross-validation method (default: loo)')
+    parser.add_argument('--cv_version', type=str, default='extended', choices=['extended', 'simple'],help='Cross-validation method (default: extended)')
     parser.add_argument('--kfold_splits', type=int, default=5,
                         help='Number of splits for k-fold cross-validation (default: 5)')
     parser.add_argument('--test_size', type=float, default=0.2,
                         help='Test set size for holdout validation (default: 0.2)')
     parser.add_argument('--optimize', action='store_true',
                         help='Perform hyperparameter optimization')
-    parser.add_argument('--n_iter', type=int, default=25,
+    parser.add_argument('--n_iter', type=int, default=40,
                         help='Number of iterations for hyperparameter optimization (default: 25)')
 
     args = parser.parse_args()
@@ -1319,6 +1623,7 @@ if __name__ == "__main__":
         n_features_to_select=args.n_features,
         channel_approach=args.channel_approach,
         cv_method=args.cv_method,
+        cv_version=args.cv_version,
         kfold_splits=args.kfold_splits,
         test_size=args.test_size
     )
