@@ -211,9 +211,9 @@ class EEGAnalyzer:
         print("\n---- EVALUATING LABEL COMBINATIONS ----")
         # Set up models
         models = {
-            'RandomForest': RandomForestClassifier(n_estimators=50, max_depth=5,
-                                                   class_weight='balanced', random_state=42),
-            'SVM': SVC(kernel='rbf', C=1.0, gamma='scale',
+            'RandomForest': RandomForestClassifier(n_estimators=200, max_depth=4,
+                                                   class_weight='balanced', random_state=48),
+            'SVM': SVC(kernel='rbf', C=0.1, gamma='scale',
                        class_weight='balanced', random_state=42, probability=True)
         }
 
@@ -1504,10 +1504,10 @@ class EEGAnalyzer:
         # Define base models with original parameters
         models = {
             'RandomForest': RandomForestClassifier(
-                n_estimators=60,
+                n_estimators=200,
                 max_depth=5,
                 class_weight='balanced',
-                random_state=42
+                random_state=48
             ),
             'SVM': SVC(
                 kernel='rbf',
@@ -1593,16 +1593,16 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description='EEG Data Analysis Tool')
-    parser.add_argument('--features_file', type=str, default="data/merged_features/32_captures/o1.csv",
+    parser.add_argument('--features_file', type=str, default="data/merged_features/47_captures/o1_47_holdout_trains.csv",
                         help='Path to the CSV file containing EEG features')
     parser.add_argument('--top_n_labels', type=int, default=2,
                         help='Number of labels to analyze (default: 2)')
-    parser.add_argument('--n_features', type=int, default=5,
+    parser.add_argument('--n_features', type=int, default=6,
                         help='Number of top features to select (default: 8)')
     parser.add_argument('--channel_approach', type=str, default="pooled",
                         choices=["pooled", "separate", "features"],
                         help='How to handle channel data (default: pooled)')
-    parser.add_argument('--cv_method', type=str, default="loo",
+    parser.add_argument('--cv_method', type=str, default="kfold",
                         choices=["loo", "kfold", "holdout"],
                         help='Cross-validation method (default: loo)')
     parser.add_argument('--cv_version', type=str, default='extended', choices=['extended', 'simple'],help='Cross-validation method (default: extended)')

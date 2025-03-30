@@ -67,9 +67,9 @@ def save_metrics_report(y_true, y_pred, output_dir, model_name, test_data_path):
 
 def main():
     parser = argparse.ArgumentParser(description='Predict using a saved EEG model and calculate metrics')
-    parser.add_argument('--model', type=str, default='ml_model_outputs/76%_random_forest_o1/best_svm_model.pkl',
+    parser.add_argument('--model', type=str, default='ml_model_outputs/run_1743297420/base_randomforest_model.pkl',
                         help='Path to the saved model (e.g., best_randomforest_model.pkl)')
-    parser.add_argument('--test_data', type=str, default='data/merged_features/2_labels_6+6_12_captures_friday/2_sess_12_captures.csv',
+    parser.add_argument('--test_data', type=str, default='data/merged_features/47_captures/o1_47_holdout_tests.csv',
                         help='Path to the test data CSV file')
     parser.add_argument('--output_dir', type=str, default='data/test_outputs/test_results',
                         help='Directory to save predictions and metrics')

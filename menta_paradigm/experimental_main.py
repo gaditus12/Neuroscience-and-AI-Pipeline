@@ -330,8 +330,8 @@ class ExperimentSession:
         self.attention_beep='sound/attention.wav'
         self.relax_beep='sound/relax.wav'
         # some settings
-        self.sess_count=5
-        self.short_intro= False
+        self.sess_count=4
+        self.short_intro= True
 
     def play_introduction(self):
         if not self.short_intro:

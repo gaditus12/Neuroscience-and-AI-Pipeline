@@ -1,5 +1,5 @@
-evaluation_date: 2025-03-15 20:07:36
-model_name: best_randomforest_model.pkl
-test_data: 2+4_6_captures_2_labels.csv
-num_samples: 12
+evaluation_date: 2025-03-30 03:18:23
+model_name: base_randomforest_model.pkl
+test_data: o1_47_holdout_tests.csv
+num_samples: 18
 metrics_files: ['data/test_outputs/test_results\\test_metrics.csv', 'data/test_outputs/test_results\\classification_report.csv', 'data/test_outputs/test_results\\confusion_matrix.png']
