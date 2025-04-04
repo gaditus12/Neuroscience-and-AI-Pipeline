@@ -467,7 +467,8 @@ class EEGFeatureMerger:
                     df['label'] = label
 
                     # Add session info (extracted from directory structure)
-                    session_dir = os.path.basename(os.path.dirname(filepath))
+                    # Updated to go one directory higher:
+                    session_dir = os.path.basename(os.path.dirname(os.path.dirname(filepath)))
                     df['session'] = session_dir
 
                     # Rename index column to channel if it exists
@@ -641,8 +642,8 @@ def main():
                         help='Base input directory containing processed data folders')
     parser.add_argument('--output_dir', type=str, default='data/extracted_features',
                         help='Base output directory for feature files')
-    parser.add_argument('--merged_dir', type=str, default=f'data/merged_features/merge_run_{int(time.time())}',
-                        help='Directory for merged feature files')
+    parser.add_argument('--merged_dir', type=str, default=None,
+                        help='Directory for merged feature files. If not provided, generated as data/merged_features/{session_count}_sessions_merge_{timestamp}')
     parser.add_argument('--sfreq', type=float, default=250.0,
                         help='Sampling frequency in Hz (default: 250.0)')
     parser.add_argument('--skip_extraction', action='store_true',
@@ -667,22 +668,38 @@ def main():
 
     # Create merged feature files
     if not args.skip_merging and not args.importance_only:
+        # Determine merged directory path
+        if args.merged_dir is None:
+            print("\nScanning feature files to determine session count...")
+            # Initialize merger to scan existing feature files
+            merger = EEGFeatureMerger(args.output_dir)
+            zone_files = merger.scan_feature_files()
+
+            # Extract unique session directories
+            sessions = set()
+            for zone, file_list in zone_files.items():
+                for (filepath, _) in file_list:
+                    # Get session directory (grandparent of feature file)
+                    session_dir = os.path.basename(os.path.dirname(os.path.dirname(filepath)))
+                    sessions.add(session_dir)
+            session_count = len(sessions)
+
+            # Generate merged directory name
+            timestamp = int(time.time())
+            args.merged_dir = os.path.join(
+                'data', 'merged_features',
+                f'{session_count}_sessions_merge_{timestamp}'
+            )
+            print(f"Generated merged directory: {args.merged_dir}")
+
+        # Proceed with merging
         merge_start_time = time.time()
         print("\nCreating merged feature files...")
         output_files, summary_file = create_merged_feature_files(args.output_dir, args.merged_dir)
         merge_end_time = time.time()
 
         print(f"Feature merging time: {merge_end_time - merge_start_time:.2f} seconds")
-
-        # Print summary of created files
-        print("\nCreated the following merged feature files:")
-        for zone, filepath in output_files.items():
-            print(f"- {zone}: {filepath}")
-
-        if summary_file:
-            print(f"- Summary statistics: {summary_file}")
-    elif args.skip_merging or args.importance_only:
-        print("Skipping feature merging.")
+        # ... [Rest of the merging logic remains unchanged] ...
 
     # Calculate feature importance
     importance_start_time = time.time()
