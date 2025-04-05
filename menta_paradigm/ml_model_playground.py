@@ -2,6 +2,7 @@ import os
 import time
 
 from itertools import combinations
+from tqdm import tqdm
 
 from sklearn.decomposition import PCA
 import matplotlib
@@ -211,8 +212,8 @@ class EEGAnalyzer:
         print("\n---- EVALUATING LABEL COMBINATIONS ----")
         # Set up models
         models = {
-            'RandomForest': RandomForestClassifier(n_estimators=200, max_depth=4,
-                                                   class_weight='balanced', random_state=48),
+            'RandomForest': RandomForestClassifier(n_estimators=200, max_depth=5,
+                                                   class_weight='balanced', random_state=48, min_samples_leaf=2),
             'SVM': SVC(kernel='rbf', C=0.1, gamma='scale',
                        class_weight='balanced', random_state=42, probability=True)
         }
@@ -691,21 +692,58 @@ class EEGAnalyzer:
             print(classification_report(y_test.tolist(), y_pred))
 
         return results
+
     def export_misclassified_samples(self):
-        """Export misclassified sample examples for all label combinations, merging with original features."""
-        print("\n---- EXPORTING MISCLASSIFIED SAMPLES ----")
+        """Export misclassified samples and calculate session-level accuracy."""
+        print("\n---- EXPORTING MISCLASSIFIED SAMPLES & SESSION ACCURACY ----")
+
         for combo in self.detailed_results:
             combo_str = '_'.join(combo)
-            misclassified_dict = self.detailed_results[combo].get('misclassified_samples', {})
-            for model, misclassified in misclassified_dict.items():
-                if misclassified:  # Only export if there are misclassified examples
-                    mis_df = pd.DataFrame(misclassified)
-                    # Merge with original features (using the index)
-                    merged = pd.merge(mis_df, self.df.reset_index(), left_on='index', right_on='index', how='left')
-                    filename = f"{self.run_directory}/{self.channel_approach}_misclassified_{combo_str}_{model}_{self.cv_method}.csv"
-                    merged.to_csv(filename, index=False)
-                    print(f"Exported misclassified samples for combination {combo_str} with model {model} to '{filename}'")
+            df_combo = self.df[self.df["label"].isin(combo)]  # Get data for this label combo
 
+            # Only proceed if sessions exist in the data
+            if 'session' not in df_combo.columns:
+                print(f"No session data for {combo_str}. Skipping session accuracy.")
+                continue
+
+            misclassified_dict = self.detailed_results[combo].get('misclassified_samples', {})
+
+            for model, misclassified in misclassified_dict.items():
+                if not misclassified:
+                    continue
+
+                # Export misclassified samples
+                mis_df = pd.DataFrame(misclassified)
+                merged = pd.merge(mis_df, self.df.reset_index(),
+                                  left_on='index', right_on='index', how='left')
+                filename = f"{self.run_directory}/misclassified_{combo_str}_{model}.csv"
+                merged.to_csv(filename, index=False)
+
+                # --- New: Calculate session accuracy ---
+                session_accuracies = []
+                for session in df_combo['session'].unique():
+                    # Total samples in this session for current label combination
+                    total_samples = df_combo[df_combo['session'] == session].shape[0]
+
+                    # Misclassified samples in this session
+                    mis_in_session = merged[merged['session'] == session].shape[0]
+
+                    # Calculate accuracy
+                    accuracy = (total_samples - mis_in_session) / total_samples if total_samples > 0 else 0
+
+                    session_accuracies.append({
+                        'session': session,
+                        'total_samples': total_samples,
+                        'misclassified': mis_in_session,
+                        'accuracy': accuracy
+                    })
+
+                # Save session accuracy results
+                session_acc_df = pd.DataFrame(session_accuracies)
+                session_filename = f"{self.run_directory}/session_accuracy_{combo_str}_{model}.csv"
+                session_acc_df.to_csv(session_filename, index=False)
+
+                print(f"Exported session accuracy for {combo_str} ({model}) to '{session_filename}'")
     def _calculate_metrics(self, y_true, y_pred):
         """Calculate comprehensive performance metrics"""
         precision, recall, f1, _ = precision_recall_fscore_support(y_true, y_pred, average='macro')
@@ -1154,14 +1192,15 @@ class EEGAnalyzer:
         Perform Bayesian hyperparameter optimization using scikit-optimize.
 
         Parameters:
-        n_iter (int): Number of iterations for the optimization process.
+            n_iter (int): Number of iterations for the optimization process.
 
         Returns:
-        dict: Best hyperparameters found.
+            dict: Best hyperparameters found.
         """
         print("\n---- HYPERPARAMETER OPTIMIZATION ----")
         from skopt import BayesSearchCV
         from skopt.space import Real, Integer, Categorical
+        from tqdm import tqdm
 
         # Focus on data corresponding to the best label combination
         if not hasattr(self, 'best_labels'):
@@ -1192,52 +1231,75 @@ class EEGAnalyzer:
         search_spaces = {
             'RandomForest': {
                 'model': Categorical([RandomForestClassifier(random_state=42)]),
-                'model__n_estimators': Integer(50, 500),
-                'model__max_depth': Integer(5, 30),
-                'model__min_samples_split': Integer(2, 20),
-                'model__min_samples_leaf': Integer(1, 10),
+                'model__n_estimators': Integer(50, 250),
+                'model__max_depth': Integer(2, 7),
+                'model__min_samples_split': Integer(2, 5),
+                'model__min_samples_leaf': Integer(1, 4),
                 'model__class_weight': Categorical(['balanced', None]),
-                'feature_selection__k': Integer(max(3, self.n_features_to_select - 10),
-                                                min(len(self.feature_columns), self.n_features_to_select + 10))
+                'feature_selection__k': Integer(3, 15)
             },
             'SVM': {
                 'model': Categorical([SVC(random_state=42, probability=True)]),
-                'model__C': Real(0.1, 100, prior='log-uniform'),
-                'model__gamma': Real(1e-4, 1, prior='log-uniform'),
+                'model__C': Real(0.1, 10, prior='log-uniform'),
+                'model__gamma': Real(1e-4, 1e-1, prior='log-uniform'),
                 'model__kernel': Categorical(['rbf', 'linear', 'poly']),
                 'model__class_weight': Categorical(['balanced', None]),
-                'feature_selection__k': Integer(max(3, self.n_features_to_select - 10),
-                                                min(len(self.feature_columns), self.n_features_to_select + 10))
+                'feature_selection__k': Integer(2, 15)
             }
         }
 
         best_results = {}
         all_results = {}
 
-        for model_name, space in search_spaces.items():
+        # Loop over each model type with an outer tqdm progress bar
+        for model_name, space in tqdm(search_spaces.items(), desc="Optimizing models"):
             print(f"\nOptimizing {model_name}...")
 
-            # Create the pipeline
+            # Create the pipeline; note that the classifier will be replaced during optimization.
             pipeline = Pipeline([
                 ('scaler', StandardScaler()),
                 ('feature_selection', SelectKBest(f_classif)),
-                ('model', RandomForestClassifier())  # Will be replaced in the search
+                ('model', RandomForestClassifier())  # placeholder
             ])
 
-            # Create the Bayesian search
-            opt = BayesSearchCV(
-                pipeline,
-                space,
-                n_iter=n_iter,
-                cv=cv,
-                scoring='f1_macro',
-                n_jobs=-1,
-                verbose=1,
-                random_state=42
-            )
+            # Define a custom callback for progress updates if supported.
+            # This callback function updates a tqdm bar.
+            def tqdm_callback(res):
+                # Each time the callback is called, update the inner progress bar by one iteration.
+                inner_bar.update(1)
+
+            # Attempt to create an inner tqdm progress bar for n_iter iterations.
+            inner_bar = tqdm(total=n_iter, desc=f"{model_name} iterations", leave=False)
+            try:
+                opt = BayesSearchCV(
+                    pipeline,
+                    space,
+                    n_iter=n_iter,
+                    cv=cv,
+                    scoring='f1_macro',
+                    n_jobs=-1,
+                    verbose=1,
+                    random_state=42,
+                    callback=[tqdm_callback]
+                )
+            except TypeError as e:
+                print(
+                    "Callback parameter not supported in this version of BayesSearchCV. Proceeding without inner-loop progress updates.")
+                opt = BayesSearchCV(
+                    pipeline,
+                    space,
+                    n_iter=n_iter,
+                    cv=cv,
+                    scoring='f1_macro',
+                    n_jobs=-1,
+                    verbose=1,
+                    random_state=42
+                )
+                # Manually update inner_bar in a loop is not possible here.
 
             # Fit the search
             opt.fit(X_best, y_best)
+            inner_bar.close()
 
             print(f"Best {model_name} score: {opt.best_score_:.4f}")
             print(f"Best {model_name} parameters: {opt.best_params_}")
@@ -1257,8 +1319,7 @@ class EEGAnalyzer:
 
             # Save the best model to a file
             import joblib
-            joblib.dump(opt.best_estimator_,
-                        f"{self.run_directory}/best_{model_name.lower()}_model.pkl")
+            joblib.dump(opt.best_estimator_, f"{self.run_directory}/best_{model_name.lower()}_model.pkl")
 
         # Determine the best model overall
         best_model_name = max(best_results, key=lambda x: best_results[x]['score'])
@@ -1438,12 +1499,14 @@ class EEGAnalyzer:
 
         y_true_all = []
         y_pred_all = []
+        misclassified_samples = []
 
         if self.cv_method in ["loo", "kfold"]:
             # Cross-validation approach (LOO or k-fold)
-            for train_idx, test_idx in cv.split(X_best, y_best):
+            for fold_idx, (train_idx, test_idx) in enumerate(cv.split(X_best, y_best)):
                 X_train, X_test = X_best.iloc[train_idx], X_best.iloc[test_idx]
                 y_train, y_test = y_best.iloc[train_idx], y_best.iloc[test_idx]
+                test_indices = y_test.index.tolist()
 
                 # Clone the model for each fold to ensure independence
                 from sklearn.base import clone
@@ -1455,13 +1518,32 @@ class EEGAnalyzer:
 
                 y_true_all.extend(y_test.tolist())
                 y_pred_all.extend(y_pred)
+
+                # Record misclassified samples
+                for idx, true_val, pred_val in zip(test_indices, y_test, y_pred):
+                    if true_val != pred_val:
+                        misclassified_samples.append({
+                            'index': idx,
+                            'true_label': true_val,
+                            'predicted_label': pred_val,
+                            'fold': fold_idx
+                        })
         else:
             # Holdout approach
             best_model.fit(X_train, y_train)
             y_pred = best_model.predict(X_test)
-
             y_true_all = y_test.tolist()
             y_pred_all = y_pred.tolist()
+            test_indices = y_test.index.tolist()
+
+            # Record misclassified samples
+            for idx, true_val, pred_val in zip(test_indices, y_test, y_pred):
+                if true_val != pred_val:
+                    misclassified_samples.append({
+                        'index': idx,
+                        'true_label': true_val,
+                        'predicted_label': pred_val
+                    })
 
         # Calculate and display metrics
         metrics = self._calculate_metrics(y_true_all, y_pred_all)
@@ -1486,10 +1568,20 @@ class EEGAnalyzer:
         plt.savefig(f"{self.run_directory}/optimized_model_confusion_matrix.png", dpi=300)
         plt.close()
 
-        # Compare with the original best model
-        original_best_model = self.detailed_results[self.best_labels]['best_model']
-        original_metrics = self.detailed_results[self.best_labels]['metrics']
+        # Update detailed_results with optimized model's performance
+        self.detailed_results[self.best_labels]['misclassified_samples'][best_model_name] = misclassified_samples
+        self.detailed_results[self.best_labels]['metrics'][best_model_name] = metrics
+        self.detailed_results[self.best_labels]['confusion_matrices'][best_model_name] = cm
 
+        # Check if optimized model is better than previous best
+        current_best_model = self.detailed_results[self.best_labels]['best_model']
+        current_f1 = self.detailed_results[self.best_labels]['metrics'][current_best_model]['f1_macro']
+        optimized_f1 = metrics['f1_macro']
+
+        if optimized_f1 > current_f1:
+            print(
+                f"Optimized model {best_model_name} outperforms previous best {current_best_model}. Updating best model.")
+            self.detailed_results[self.best_labels]['best_model'] = best_model_name
     def save_best_models(self):
         """Save both SVM and Random Forest models for the best label combination"""
         if not hasattr(self, 'best_labels'):
@@ -1593,11 +1685,11 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description='EEG Data Analysis Tool')
-    parser.add_argument('--features_file', type=str, default="data/merged_features/47_captures/o1_47_holdout_trains.csv",
+    parser.add_argument('--features_file', type=str, default="data/normalized_merges/normalization_20250405_20/normalized_imagery_binary_o1.csv",
                         help='Path to the CSV file containing EEG features')
     parser.add_argument('--top_n_labels', type=int, default=2,
                         help='Number of labels to analyze (default: 2)')
-    parser.add_argument('--n_features', type=int, default=6,
+    parser.add_argument('--n_features', type=int, default=4,
                         help='Number of top features to select (default: 8)')
     parser.add_argument('--channel_approach', type=str, default="pooled",
                         choices=["pooled", "separate", "features"],
@@ -1606,7 +1698,7 @@ if __name__ == "__main__":
                         choices=["loo", "kfold", "holdout"],
                         help='Cross-validation method (default: loo)')
     parser.add_argument('--cv_version', type=str, default='extended', choices=['extended', 'simple'],help='Cross-validation method (default: extended)')
-    parser.add_argument('--kfold_splits', type=int, default=5,
+    parser.add_argument('--kfold_splits', type=int, default=8,
                         help='Number of splits for k-fold cross-validation (default: 5)')
     parser.add_argument('--test_size', type=float, default=0.2,
                         help='Test set size for holdout validation (default: 0.2)')
