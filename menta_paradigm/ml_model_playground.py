@@ -212,7 +212,7 @@ class EEGAnalyzer:
         print("\n---- EVALUATING LABEL COMBINATIONS ----")
         # Set up models
         models = {
-            'RandomForest': RandomForestClassifier(n_estimators=200, max_depth=5,
+            'RandomForest': RandomForestClassifier(n_estimators=50, max_depth=2,
                                                    class_weight='balanced', random_state=48, min_samples_leaf=2),
             'SVM': SVC(kernel='rbf', C=0.1, gamma='scale',
                        class_weight='balanced', random_state=42, probability=True)
@@ -1685,7 +1685,7 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description='EEG Data Analysis Tool')
-    parser.add_argument('--features_file', type=str, default="data/normalized_merges/normalization_20250405_20/normalized_imagery_binary_o1.csv",
+    parser.add_argument('--features_file', type=str, default="data/normalized_merges/normalization_20250419_19/normalized_imagery_balanced_multiclass.csv",
                         help='Path to the CSV file containing EEG features')
     parser.add_argument('--top_n_labels', type=int, default=2,
                         help='Number of labels to analyze (default: 2)')

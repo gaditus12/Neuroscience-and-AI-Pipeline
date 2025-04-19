@@ -330,7 +330,7 @@ class ExperimentSession:
         self.attention_beep='sound/attention.wav'
         self.relax_beep='sound/relax.wav'
         # some settings
-        self.sess_count=4
+        self.capture_count=5
         self.short_intro= True
 
     def play_introduction(self):
@@ -372,10 +372,10 @@ class ExperimentSession:
                     imagery_code = self.imagery_lookup_exhaust[chosen_task]
                     self.imagery_lookup_exhaust.pop(chosen_task)
                 else:
-                    if (self.sess_count==0):
+                    if (self.capture_count==0):
                         self.finish_experiment()
                     else:
-                        self.sess_count=self.sess_count-1
+                        self.capture_count=self.capture_count-1
                         self.imagery_lookup_exhaust=copy.deepcopy(self.imagery_lookup)
                         chosen_task = random.choice(list(self.imagery_lookup_exhaust.keys()))
                         imagery_code = self.imagery_lookup_exhaust[chosen_task]

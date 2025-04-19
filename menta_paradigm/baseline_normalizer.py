@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 import logging
+from scipy import signal
 
 # Setup logging
 logging.basicConfig(level=logging.INFO,
@@ -63,9 +64,53 @@ def identify_feature_columns(df):
     return feature_columns
 
 
-def normalize_data(imagery_df, baseline_df, feature_columns):
+def apply_highpass_filter(df, feature_columns, sampling_rate=250, cutoff=0.5):
     """
-    Perform within-session Z-score normalization using baseline statistics.
+    Apply high-pass filter to remove slow drifts which might be session-specific.
+
+    Args:
+        df (pd.DataFrame): DataFrame containing EEG data
+        feature_columns (list): List of feature column names
+        sampling_rate (int): Sampling rate of the EEG data in Hz
+        cutoff (float): Cutoff frequency for high-pass filter in Hz
+
+    Returns:
+        pd.DataFrame: Filtered DataFrame
+    """
+    filtered_df = df.copy()
+
+    # Design Butterworth high-pass filter
+    nyquist = sampling_rate / 2
+    normal_cutoff = cutoff / nyquist
+    b, a = signal.butter(4, normal_cutoff, btype='high', analog=False)
+
+    # Apply filter to each session-channel combination
+    session_channels = df[['session', 'channel']].drop_duplicates().values
+
+    for session, channel in session_channels:
+        indices = filtered_df[(filtered_df['session'] == session) &
+                              (filtered_df['channel'] == channel)].index
+
+        for feature in feature_columns:
+            # Get feature data for this session-channel
+            data = filtered_df.loc[indices, feature].values
+
+            # Apply filter if we have enough data points
+            if len(data) > 10:  # Arbitrary threshold to avoid filtering very short signals
+                try:
+                    filtered_data = signal.filtfilt(b, a, data)
+                    filtered_df.loc[indices, feature] = filtered_data
+                except Exception as e:
+                    logger.warning(f"Filtering failed for session {session}, channel {channel}, feature {feature}: {e}")
+
+    logger.info(f"High-pass filtering applied to remove slow drifts (cutoff={cutoff}Hz)")
+    return filtered_df
+
+
+def covariance_normalization(imagery_df, baseline_df, feature_columns):
+    """
+    Normalize the data using covariance structure from baseline.
+    This performs whitening transformation to decorrelate features based on baseline covariance.
 
     Args:
         imagery_df (pd.DataFrame): DataFrame containing imagery task data
@@ -74,68 +119,140 @@ def normalize_data(imagery_df, baseline_df, feature_columns):
 
     Returns:
         pd.DataFrame: Normalized imagery data
+        dict: Normalization statistics
     """
     normalized_df = imagery_df.copy()
 
-    # Get unique session-channel combinations
-    session_channels = imagery_df[['session', 'channel']].drop_duplicates().values
-
     # Track statistics
     normalization_stats = {
-        'total_combinations': len(session_channels),
+        'total_sessions': len(imagery_df['session'].unique()),
         'successful': 0,
         'skipped': 0,
-        'zero_std': 0
+        'ill_conditioned': 0
     }
 
-    for session, channel in session_channels:
-        # Get baseline data for this session and channel
-        baseline_subset = baseline_df[(baseline_df['session'] == session) &
-                                      (baseline_df['channel'] == channel)]
+    # Process each session
+    for session in imagery_df['session'].unique():
+        try:
+            # Get baseline data for this session
+            baseline_subset = baseline_df[baseline_df['session'] == session][feature_columns]
 
-        # Check if we have baseline data for this session and channel
-        if len(baseline_subset) == 0:
-            logger.warning(f"No baseline data found for session {session}, channel {channel}. Skipping normalization.")
-            normalization_stats['skipped'] += 1
-            continue
-
-        # Calculate baseline statistics
-        baseline_means = baseline_subset[feature_columns].mean()
-        baseline_stds = baseline_subset[feature_columns].std()
-
-        # Get imagery data for this session and channel
-        imagery_indices = normalized_df[(normalized_df['session'] == session) &
-                                        (normalized_df['channel'] == channel)].index
-
-        # Apply normalization
-        for feature in feature_columns:
-            std_value = baseline_stds[feature]
-
-            # Handle zero standard deviation
-            if std_value == 0 or pd.isna(std_value):
+            # Check if we have enough baseline data
+            if len(baseline_subset) < len(feature_columns):
                 logger.warning(
-                    f"Zero or NaN std for {feature} in session {session}, channel {channel}. Using mean without normalization.")
+                    f"Insufficient baseline data for session {session}. Falling back to Z-score normalization.")
+
+                # Fall back to Z-score normalization by channel
+                for channel in imagery_df[imagery_df['session'] == session]['channel'].unique():
+                    baseline_channel = baseline_df[(baseline_df['session'] == session) &
+                                                   (baseline_df['channel'] == channel)]
+
+                    if len(baseline_channel) == 0:
+                        continue
+
+                    baseline_means = baseline_channel[feature_columns].mean()
+                    baseline_stds = baseline_channel[feature_columns].std()
+
+                    indices = normalized_df[(normalized_df['session'] == session) &
+                                            (normalized_df['channel'] == channel)].index
+
+                    for feature in feature_columns:
+                        std_value = baseline_stds[feature]
+                        if std_value > 0 and not pd.isna(std_value):
+                            normalized_df.loc[indices, feature] = ((normalized_df.loc[indices, feature] -
+                                                                    baseline_means[feature]) / std_value)
+                        else:
+                            normalized_df.loc[indices, feature] = normalized_df.loc[indices, feature] - baseline_means[
+                                feature]
+
+                normalization_stats['skipped'] += 1
+                continue
+
+            # Calculate covariance matrix from baseline
+            baseline_mean = baseline_subset.mean()
+            baseline_cov = np.cov(baseline_subset.T)
+
+            # Check if covariance matrix is well-conditioned
+            eigenvalues = np.linalg.eigvalsh(baseline_cov)
+            condition_number = np.max(eigenvalues) / np.max(np.abs(eigenvalues[eigenvalues > 1e-10]))
+
+            if condition_number > 1e6 or np.any(eigenvalues <= 0):
+                logger.warning(f"Ill-conditioned covariance matrix for session {session}. Adding regularization.")
+                # Add small regularization to make it positive definite
+                baseline_cov += np.eye(baseline_cov.shape[0]) * (np.trace(baseline_cov) * 1e-3)
+                normalization_stats['ill_conditioned'] += 1
+
+            # Compute whitening matrix using eigendecomposition
+            eigenvalues, eigenvectors = np.linalg.eigh(baseline_cov)
+            eigenvalues = np.maximum(eigenvalues, 1e-10)  # Ensure all eigenvalues are positive
+            whitening_matrix = eigenvectors @ np.diag(1.0 / np.sqrt(eigenvalues)) @ eigenvectors.T
+
+            # Get imagery data for this session
+            imagery_indices = normalized_df[normalized_df['session'] == session].index
+
+            # Center the data
+            for feature in feature_columns:
                 normalized_df.loc[imagery_indices, feature] = normalized_df.loc[imagery_indices, feature] - \
-                                                              baseline_means[feature]
-                normalization_stats['zero_std'] += 1
-            else:
-                normalized_df.loc[imagery_indices, feature] = (
-                            (normalized_df.loc[imagery_indices, feature] - baseline_means[feature]) /
-                            std_value)
+                                                              baseline_mean[feature]
 
-        normalization_stats['successful'] += 1
+            # Apply whitening transformation by channel
+            for channel in imagery_df[imagery_df['session'] == session]['channel'].unique():
+                channel_indices = normalized_df[(normalized_df['session'] == session) &
+                                                (normalized_df['channel'] == channel)].index
 
-        # Log progress for every 10 combinations
-        if normalization_stats['successful'] % 10 == 0:
-            logger.info(
-                f"Processed {normalization_stats['successful']}/{normalization_stats['total_combinations']} combinations")
+                # Extract feature data for this channel
+                channel_data = normalized_df.loc[channel_indices, feature_columns].values
 
-    # Log normalization statistics
-    logger.info(f"Normalization complete: {normalization_stats['successful']} successful, "
+                # Apply whitening transformation
+                whitened_data = channel_data @ whitening_matrix
+
+                # Update normalized DataFrame
+                normalized_df.loc[channel_indices, feature_columns] = whitened_data
+
+            normalization_stats['successful'] += 1
+            logger.info(f"Covariance normalization applied for session {session}")
+
+        except Exception as e:
+            logger.error(f"Error in covariance normalization for session {session}: {e}")
+            normalization_stats['skipped'] += 1
+
+    logger.info(f"Covariance normalization complete: {normalization_stats['successful']} successful, "
                 f"{normalization_stats['skipped']} skipped, "
-                f"{normalization_stats['zero_std']} features with zero std")
+                f"{normalization_stats['ill_conditioned']} required regularization")
 
     return normalized_df, normalization_stats
+
+
+def normalize_data(imagery_df, baseline_df, feature_columns):
+    """
+    Perform enhanced normalization to reduce session-specific characteristics.
+
+    Args:
+        imagery_df (pd.DataFrame): DataFrame containing imagery task data
+        baseline_df (pd.DataFrame): DataFrame containing baseline data
+        feature_columns (list): List of feature column names
+
+    Returns:
+        pd.DataFrame: Normalized imagery data
+        dict: Normalization statistics
+    """
+    # Step 1: Apply high-pass filtering to both imagery and baseline data
+    logger.info("Applying high-pass filtering to remove slow drifts...")
+    filtered_imagery = apply_highpass_filter(imagery_df, feature_columns)
+    filtered_baseline = apply_highpass_filter(baseline_df, feature_columns)
+
+    # Step 2: Apply covariance-based normalization
+    logger.info("Applying covariance-based normalization...")
+    normalized_df, cov_stats = covariance_normalization(filtered_imagery, filtered_baseline, feature_columns)
+
+    # Combine statistics for reporting
+    stats = {
+        'highpass_filter_applied': True,
+        'cutoff_frequency': 0.5,  # Hz
+        'covariance_normalization': cov_stats
+    }
+
+    return normalized_df, stats
 
 
 def save_normalized_data(normalized_df, stats, output_dir=None):
@@ -167,10 +284,15 @@ def save_normalized_data(normalized_df, stats, output_dir=None):
     with open(summary_file, 'w') as f:
         f.write("Normalization Summary\n")
         f.write("====================\n\n")
-        f.write(f"Total session-channel combinations: {stats['total_combinations']}\n")
-        f.write(f"Successfully normalized: {stats['successful']}\n")
-        f.write(f"Skipped (no baseline data): {stats['skipped']}\n")
-        f.write(f"Features with zero std: {stats['zero_std']}\n")
+        f.write("Advanced normalization techniques applied:\n")
+        f.write("- High-pass filtering (0.5 Hz cutoff)\n")
+        f.write("- Covariance-based normalization (whitening)\n\n")
+
+        f.write("Covariance Normalization Statistics:\n")
+        f.write(f"- Total sessions: {stats['covariance_normalization']['total_sessions']}\n")
+        f.write(f"- Successfully normalized: {stats['covariance_normalization']['successful']}\n")
+        f.write(f"- Skipped (insufficient data): {stats['covariance_normalization']['skipped']}\n")
+        f.write(f"- Required regularization: {stats['covariance_normalization']['ill_conditioned']}\n")
 
     logger.info(f"Saved normalization summary to {summary_file}")
     return output_dir
@@ -228,7 +350,7 @@ def verify_data_integrity(imagery_df, baseline_df):
 
 def main():
     """
-    Main function to execute the normalization process.
+    Main function to execute the enhanced normalization process.
     """
     try:
         # 1. Define input and output paths
@@ -249,8 +371,8 @@ def main():
         logger.info("Verifying data integrity...")
         verify_data_integrity(imagery_df, baseline_df)
 
-        # 5. Perform normalization
-        logger.info("Performing within-session Z-score normalization...")
+        # 5. Perform enhanced normalization
+        logger.info("Performing enhanced normalization to reduce session specificity...")
         normalized_df, stats = normalize_data(imagery_df, baseline_df, feature_columns)
 
         # 6. Save results
@@ -259,7 +381,7 @@ def main():
         output_dir = f"data/normalized_merges/normalization_{timestamp}"
         save_normalized_data(normalized_df, stats, output_dir)
 
-        logger.info("Normalization process completed successfully!")
+        logger.info("Enhanced normalization process completed successfully!")
 
     except Exception as e:
         logger.error(f"Error in normalization process: {e}", exc_info=True)
