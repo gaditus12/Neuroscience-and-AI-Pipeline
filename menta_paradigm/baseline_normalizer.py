@@ -63,58 +63,25 @@ def identify_feature_columns(df):
     return feature_columns
 
 
-# ------------------------------------------------------------------
-# Helper : scale each (session, channel, feature) range to [-3, 3]
-# ------------------------------------------------------------------
-def range_scale_per_session_channel(df, feature_cols,
-                                    target_min=-3.0, target_max=3.0):
-    """
-    Linearly map the values of EVERY (session, channel, feature) slice
-    so that its local min -> target_min and its local max -> target_max.
-
-    Constant / all‑NaN slices are left unchanged.
-
-    Returns
-    -------
-    df     : the SAME dataframe, modified in‑place for speed
-    stats  : dict with simple counters for logging
-    """
-    span = target_max - target_min
-    stats = {'scaled_blocks': 0, 'constant_or_nan': 0}
-
-    # loop over unique session‑channel combos
-    for (sess, ch), idx in df.groupby(['session', 'channel']).groups.items():
-        block       = df.loc[idx, feature_cols]
-        blk_min     = block.min()
-        blk_max     = block.max()
-        denom       = blk_max - blk_min           # range per feature
-        scale_mask  = denom.gt(0) & denom.notna() # features we CAN scale
-
-        if scale_mask.any():
-            df.loc[idx, scale_mask.index[scale_mask]] = (
-                (block[scale_mask.index[scale_mask]] - blk_min[scale_mask]) /
-                denom[scale_mask]                       # --> 0‑1
-            ) * span + target_min                      # --> target range
-            stats['scaled_blocks'] += scale_mask.sum()
-
-        stats['constant_or_nan'] += (~scale_mask).sum()
-
-    return df, stats
-
-
 def normalize_data(imagery_df, baseline_df, feature_columns):
     """
-    1.  Within‑session Z‑score normalisation w.r.t. baseline
-    2.  Per‑(session, channel, feature) min‑max scaling to [-3, 3]
+    Perform within-session Z-score normalization using baseline statistics.
+
+    Args:
+        imagery_df (pd.DataFrame): DataFrame containing imagery task data
+        baseline_df (pd.DataFrame): DataFrame containing baseline data
+        feature_columns (list): List of feature column names
+
+    Returns:
+        pd.DataFrame: Normalized imagery data
     """
     normalized_df = imagery_df.copy()
 
-    # ------------------------------------------------------------------
-    # Step‑1 : Z‑score using baseline stats (same logic you already had)
-    # ------------------------------------------------------------------
+    # Get unique session-channel combinations
     session_channels = imagery_df[['session', 'channel']].drop_duplicates().values
 
-    stats = {
+    # Track statistics
+    normalization_stats = {
         'total_combinations': len(session_channels),
         'successful': 0,
         'skipped': 0,
@@ -122,51 +89,54 @@ def normalize_data(imagery_df, baseline_df, feature_columns):
     }
 
     for session, channel in session_channels:
+        # Get baseline data for this session and channel
         baseline_subset = baseline_df[(baseline_df['session'] == session) &
                                       (baseline_df['channel'] == channel)]
 
-        if baseline_subset.empty:
-            logger.warning(f"No baseline for session {session}, channel {channel}. Skipping.")
-            stats['skipped'] += 1
+        # Check if we have baseline data for this session and channel
+        if len(baseline_subset) == 0:
+            logger.warning(f"No baseline data found for session {session}, channel {channel}. Skipping normalization.")
+            normalization_stats['skipped'] += 1
             continue
 
-        means = baseline_subset[feature_columns].mean()
-        stds  = baseline_subset[feature_columns].std()
+        # Calculate baseline statistics
+        baseline_means = baseline_subset[feature_columns].mean()
+        baseline_stds = baseline_subset[feature_columns].std()
 
-        idx = normalized_df[(normalized_df['session'] == session) &
-                            (normalized_df['channel'] == channel)].index
+        # Get imagery data for this session and channel
+        imagery_indices = normalized_df[(normalized_df['session'] == session) &
+                                        (normalized_df['channel'] == channel)].index
 
-        for feat in feature_columns:
-            if stds[feat] == 0 or pd.isna(stds[feat]):
-                # fall back to centring only
-                normalized_df.loc[idx, feat] = normalized_df.loc[idx, feat] - means[feat]
-                stats['zero_std'] += 1
+        # Apply normalization
+        for feature in feature_columns:
+            std_value = baseline_stds[feature]
+
+            # Handle zero standard deviation
+            if std_value == 0 or pd.isna(std_value):
+                logger.warning(
+                    f"Zero or NaN std for {feature} in session {session}, channel {channel}. Using mean without normalization.")
+                normalized_df.loc[imagery_indices, feature] = normalized_df.loc[imagery_indices, feature] - \
+                                                              baseline_means[feature]
+                normalization_stats['zero_std'] += 1
             else:
-                normalized_df.loc[idx, feat] = (
-                    (normalized_df.loc[idx, feat] - means[feat]) / stds[feat]
-                )
+                normalized_df.loc[imagery_indices, feature] = (
+                            (normalized_df.loc[imagery_indices, feature] - baseline_means[feature]) /
+                            std_value)
 
-        stats['successful'] += 1
-        if stats['successful'] % 10 == 0:
-            logger.info(f"Processed {stats['successful']}/{stats['total_combinations']} combinations")
+        normalization_stats['successful'] += 1
 
-    logger.info(f"Z‑score complete: {stats['successful']} ok, "
-                f"{stats['skipped']} skipped, {stats['zero_std']} zero‑std")
+        # Log progress for every 10 combinations
+        if normalization_stats['successful'] % 10 == 0:
+            logger.info(
+                f"Processed {normalization_stats['successful']}/{normalization_stats['total_combinations']} combinations")
 
-    # ------------------------------------------------------------------
-    # Step‑2 : Range‑scale each block to [-3, 3]
-    # ------------------------------------------------------------------
-    logger.info("Scaling every (session, channel, feature) slice to [-3, 3] ...")
-    normalized_df, scale_stats = range_scale_per_session_channel(
-        normalized_df, feature_columns, target_min=-3.0, target_max=3.0)
+    # Log normalization statistics
+    logger.info(f"Normalization complete: {normalization_stats['successful']} successful, "
+                f"{normalization_stats['skipped']} skipped, "
+                f"{normalization_stats['zero_std']} features with zero std")
 
-    logger.info(f"Range scaling complete "
-                f"(scaled features: {scale_stats['scaled_blocks']}, "
-                f"constant/NaN features: {scale_stats['constant_or_nan']})")
+    return normalized_df, normalization_stats
 
-    # merge stats for downstream saving
-    stats['range_scaling'] = scale_stats
-    return normalized_df, stats
 
 def save_normalized_data(normalized_df, stats, output_dir=None):
     """
