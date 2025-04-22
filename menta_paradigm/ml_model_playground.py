@@ -13,6 +13,12 @@ import seaborn as sns
 import joblib
 import matplotlib.patches as patches
 import matplotlib.transforms as transforms
+from sklearn.model_selection import LeaveOneGroupOut   # NEW
+from sklearn.linear_model import LogisticRegression
+from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
+from sklearn.ensemble import ExtraTreesClassifier, HistGradientBoostingClassifier
+from sklearn.naive_bayes import GaussianNB
+from sklearn.neighbors import KNeighborsClassifier
 
 # Add these to your imports at the top of the file
 import numpy as np
@@ -42,7 +48,7 @@ class EEGAnalyzer:
                  top_n_labels=2,
                  n_features_to_select=15,
                  channel_approach="pooled",  # Options: "pooled", "separate", "features"
-                 cv_method="loo",  # Options: "loo", "kfold", "holdout"
+                 cv_method="kfold",  # Options: "loo", "kfold", "holdout"
                  cv_version='extended', #extended or simple with a simple feature selection
                  kfold_splits=5,
                  test_size=0.2):  # For holdout validation
@@ -208,6 +214,57 @@ class EEGAnalyzer:
                 return [i for i, m in enumerate(mask) if m]
             return mask
 
+    # --------------------------------------------------------------
+    #  NEW : evaluation helper for Leave‑One‑Session‑Out
+    # --------------------------------------------------------------
+    def _evaluate_with_cv_loso(self, X, y, models, cv, groups):
+        """
+        Exactly the same logic as _evaluate_with_cv, but
+        the splitter requires `groups` as third argument.
+        """
+        results = {'model_metrics': {}, 'confusion_matrices': {}, 'misclassified_samples': {}}
+
+        X_array = X.values if isinstance(X, pd.DataFrame) else X
+
+        for name, model in models.items():
+            y_true_all, y_pred_all, misclassified = [], [], []
+
+            for train_idx, test_idx in cv.split(X_array, y, groups):
+                X_tr, X_te = X_array[train_idx], X_array[test_idx]
+                y_tr, y_te = y.iloc[train_idx], y.iloc[test_idx]
+                test_indices = y.iloc[test_idx].index.tolist()
+
+                # scale + select on training fold only
+                scaler   = StandardScaler().fit(X_tr)
+                X_tr_s   = scaler.transform(X_tr)
+                X_te_s   = scaler.transform(X_te)
+
+                selector = SelectKBest(f_classif, k=self.n_features_to_select).fit(X_tr_s, y_tr)
+                X_tr_sel = selector.transform(X_tr_s)
+                X_te_sel = selector.transform(X_te_s)
+
+                model.fit(X_tr_sel, y_tr)
+                y_pred = model.predict(X_te_sel)
+
+                y_true_all.extend(y_te.tolist())
+                y_pred_all.extend(y_pred)
+
+                for idx, t, p in zip(test_indices, y_te.tolist(), y_pred):
+                    if t != p:
+                        misclassified.append({'index': idx,
+                                              'true_label': t,
+                                              'predicted_label': p,
+                                              'session_left_out': groups[test_idx[0]]})
+
+            results['model_metrics'][name]        = self._calculate_metrics(y_true_all, y_pred_all)
+            results['confusion_matrices'][name]   = confusion_matrix(y_true_all, y_pred_all)
+            results['misclassified_samples'][name] = misclassified
+
+            print(f"\n{name} (LOSO) Classification Report:")
+            print(classification_report(y_true_all, y_pred_all))
+
+        return results
+
     def evaluate_label_combinations(self):
         print("\n---- EVALUATING LABEL COMBINATIONS ----")
         # Set up models
@@ -215,7 +272,27 @@ class EEGAnalyzer:
             'RandomForest': RandomForestClassifier(n_estimators=50, max_depth=2,
                                                    class_weight='balanced', random_state=48, min_samples_leaf=2),
             'SVM': SVC(kernel='rbf', C=0.1, gamma='scale',
-                       class_weight='balanced', random_state=42, probability=True)
+                       class_weight='balanced', random_state=42, probability=True),
+            # new ✱
+            'ElasticNetLogReg': LogisticRegression(
+                penalty='elasticnet', solver='saga',
+                class_weight='balanced', max_iter=5000, random_state=42, l1_ratio=0.5),
+
+            'ShrinkageLDA': LinearDiscriminantAnalysis(
+                solver='lsqr', shrinkage='auto'),
+
+            'ExtraTrees': ExtraTreesClassifier(
+                n_estimators=100, max_depth=None, class_weight='balanced',
+                random_state=48),
+
+            'HGBClassifier': HistGradientBoostingClassifier(
+                learning_rate=0.1, max_depth=3,
+                class_weight='balanced', random_state=48),
+
+            'GaussianNB': GaussianNB(),
+
+            'kNN': KNeighborsClassifier(
+                n_neighbors=7, weights='distance')
         }
 
         # Choose CV method based on parameter
@@ -237,6 +314,13 @@ class EEGAnalyzer:
             print(f"Using holdout validation with test_size={self.test_size}")
             cv = None
             cv_method = self._evaluate_with_holdout
+        elif self.cv_method == "loso":
+            print("Using Leave‑One‑SESSION‑Out CV")
+            cv         = LeaveOneGroupOut()
+            # always use the *simple* evaluator, but with groups
+            cv_method  = self._evaluate_with_cv_loso
+
+
         else:
             raise ValueError("Invalid cv_method provided. Choose 'loo', 'kfold', or 'holdout'.")
 
@@ -252,7 +336,12 @@ class EEGAnalyzer:
             print(f"  Per label: {combo_sample_count.to_dict()}")
 
             # FIX: Pass raw data to cv_method, which will handle scaling and feature selection properly
-            results = cv_method(X_subset, y_subset, models, cv)
+            # ---- call the correct evaluator ----
+            if self.cv_method == "loso":
+                groups = df_subset["session"].values  # 1‑D array of session IDs
+                results = cv_method(X_subset, y_subset, models, cv, groups)
+            else:
+                results = cv_method(X_subset, y_subset, models, cv)
 
             # Store results
             best_model = max(results['model_metrics'], key=lambda m: results['model_metrics'][m]['f1_macro'])
@@ -1232,20 +1321,59 @@ class EEGAnalyzer:
             'RandomForest': {
                 'model': Categorical([RandomForestClassifier(random_state=42)]),
                 'model__n_estimators': Integer(50, 250),
-                'model__max_depth': Integer(2, 7),
+                'model__max_depth': Integer(2, 15), #TODO revert after checking the accuracy
                 'model__min_samples_split': Integer(2, 5),
                 'model__min_samples_leaf': Integer(1, 4),
                 'model__class_weight': Categorical(['balanced', None]),
-                'feature_selection__k': Integer(3, 15)
+                'feature_selection__k': Integer(3, 30) # TODO  revert after checking the accuracy
             },
-            'SVM': {
-                'model': Categorical([SVC(random_state=42, probability=True)]),
-                'model__C': Real(0.1, 10, prior='log-uniform'),
-                'model__gamma': Real(1e-4, 1e-1, prior='log-uniform'),
-                'model__kernel': Categorical(['rbf', 'linear', 'poly']),
-                'model__class_weight': Categorical(['balanced', None]),
-                'feature_selection__k': Integer(2, 15)
-            }
+            # 'SVM': {
+            #     'model': Categorical([SVC(random_state=42, probability=True)]),
+            #     'model__C': Real(0.1, 10, prior='log-uniform'),
+            #     'model__gamma': Real(1e-4, 1e-1, prior='log-uniform'),
+            #     'model__kernel': Categorical(['rbf', 'linear', 'poly']),
+            #     'model__class_weight': Categorical(['balanced', None]),
+            #     'feature_selection__k': Integer(2, 15)
+            # },
+            'ElasticNetLogReg': {
+                'model': Categorical([LogisticRegression(
+                    penalty='elasticnet', solver='saga',
+                    class_weight='balanced', max_iter=5000, random_state=42)]),
+                'model__C': Real(1e-3, 100, prior='log-uniform'),
+                'model__l1_ratio': Real(0.0, 1.0),
+                'feature_selection__k': Integer(5, 30)
+            },
+
+            # 'ExtraTrees': {
+            #     'model': Categorical([ExtraTreesClassifier(class_weight='balanced',
+            #                                                random_state=42)]),
+            #     'model__n_estimators': Integer(50, 300),
+            #     'model__max_depth': Categorical([None, 2, 4, 6, 8, 10]),
+            #     'model__min_samples_leaf': Integer(1, 5),
+            #     'feature_selection__k': Integer(5, 30)
+            # },
+            'HGBClassifier': {
+                'model': Categorical([HistGradientBoostingClassifier(
+                    class_weight='balanced', random_state=42)]),
+                'model__learning_rate': Real(0.01, 0.3, prior='log-uniform'),
+                'model__max_depth': Integer(2, 4),
+                'model__max_iter': Integer(50, 300),
+                'feature_selection__k': Integer(5, 30)
+            },
+
+            # 'kNN': {
+            #     'model': Categorical([KNeighborsClassifier()]),
+            #     'model__n_neighbors': Integer(3, 15),
+            #     'model__weights': Categorical(['uniform', 'distance']),
+            #     'feature_selection__k': Integer(5, 30)
+            # },
+            # 'GaussianNB': {  # nothing to tune – still include for completeness
+            #     'model': Categorical([GaussianNB()])
+            # },
+            # 'ShrinkageLDA': {  # almost parameter‑free
+            #     'model': Categorical([LinearDiscriminantAnalysis(solver='lsqr')]),
+            #     'model__shrinkage': Categorical(['auto', None])
+            # },
         }
 
         best_results = {}
@@ -1298,7 +1426,11 @@ class EEGAnalyzer:
                 # Manually update inner_bar in a loop is not possible here.
 
             # Fit the search
-            opt.fit(X_best, y_best)
+            if self.cv_method == "loso":
+                groups_best = df_best["session"].values
+                opt.fit(X_best, y_best, groups=groups_best)
+            else:
+                opt.fit(X_best, y_best)
             inner_bar.close()
 
             print(f"Best {model_name} score: {opt.best_score_:.4f}")
@@ -1489,21 +1621,30 @@ class EEGAnalyzer:
         if self.cv_method == "loo":
             from sklearn.model_selection import LeaveOneOut
             cv = LeaveOneOut()
+            groups_eval = df_best["session"].values
         elif self.cv_method == "kfold":
             from sklearn.model_selection import StratifiedKFold
             cv = StratifiedKFold(n_splits=self.kfold_splits)
-        else:  # holdout
+            groups_eval = df_best["session"].values
+        elif self.cv_method == "loso":
+            cv = LeaveOneGroupOut()
+            groups_eval = df_best["session"].values
+        else:  # TODO Holdout is not working properly, fix it
             from sklearn.model_selection import train_test_split
             X_train, X_test, y_train, y_test = train_test_split(
                 X_best, y_best, test_size=self.test_size, random_state=42, stratify=y_best)
+            groups_eval = df_best["session"].values
+
 
         y_true_all = []
         y_pred_all = []
         misclassified_samples = []
 
-        if self.cv_method in ["loo", "kfold"]:
+        if self.cv_method in ["loo", "kfold", "loso"]:
             # Cross-validation approach (LOO or k-fold)
-            for fold_idx, (train_idx, test_idx) in enumerate(cv.split(X_best, y_best)):
+            for fold_idx, (train_idx, test_idx) in enumerate(
+                    cv.split(X_best, y_best, groups=groups_eval) if groups_eval is not None
+                    else cv.split(X_best, y_best)):
                 X_train, X_test = X_best.iloc[train_idx], X_best.iloc[test_idx]
                 y_train, y_test = y_best.iloc[train_idx], y_best.iloc[test_idx]
                 test_indices = y_test.index.tolist()
@@ -1685,22 +1826,22 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description='EEG Data Analysis Tool')
-    parser.add_argument('--features_file', type=str, default="data/normalized_merges/normalization_20250419_19/normalized_imagery_balanced_multiclass.csv",
+    parser.add_argument('--features_file', type=str, default="data/normalized_merges/14_train_comBat/normalized_imagery.csv",
                         help='Path to the CSV file containing EEG features')
     parser.add_argument('--top_n_labels', type=int, default=2,
                         help='Number of labels to analyze (default: 2)')
-    parser.add_argument('--n_features', type=int, default=4,
+    parser.add_argument('--n_features', type=int, default=6,
                         help='Number of top features to select (default: 8)')
     parser.add_argument('--channel_approach', type=str, default="pooled",
                         choices=["pooled", "separate", "features"],
                         help='How to handle channel data (default: pooled)')
-    parser.add_argument('--cv_method', type=str, default="kfold",
-                        choices=["loo", "kfold", "holdout"],
+    parser.add_argument('--cv_method', type=str, default="loo",
+                        choices=["loo", "kfold", "holdout", 'loso'],
                         help='Cross-validation method (default: loo)')
     parser.add_argument('--cv_version', type=str, default='extended', choices=['extended', 'simple'],help='Cross-validation method (default: extended)')
-    parser.add_argument('--kfold_splits', type=int, default=8,
+    parser.add_argument('--kfold_splits', type=int, default=6,
                         help='Number of splits for k-fold cross-validation (default: 5)')
-    parser.add_argument('--test_size', type=float, default=0.2,
+    parser.add_argument('--test_size', type=float, default=0.25,
                         help='Test set size for holdout validation (default: 0.2)')
     parser.add_argument('--optimize', action='store_true',
                         help='Perform hyperparameter optimization')

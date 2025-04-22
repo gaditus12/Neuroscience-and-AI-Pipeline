@@ -3,11 +3,20 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 import logging
+import joblib
 
 # Setup logging
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+try:
+    from neuroHarmonize.harmonizationLearn import harmonizationLearn
+    from neuroHarmonize.harmonizationApply import harmonizationApply
+    COMBAT_AVAILABLE = True
+except (ImportError, ModuleNotFoundError) as e:
+    COMBAT_AVAILABLE = False
+    logger.warning("neuroHarmonize + statsmodels not installed, "
+                   "batch harmonisation will be skipped (%s).", e)
 
 
 def load_data(directory):
@@ -62,6 +71,56 @@ def identify_feature_columns(df):
     logger.info(f"Identified {len(feature_columns)} feature columns")
     return feature_columns
 
+
+def apply_combat(df: pd.DataFrame,
+                 feature_columns: list[str],
+                 keep_label: bool = True) -> pd.DataFrame:
+    """
+    Run ComBat (neuroHarmonize) across *sessions* to remove scanner / session
+    effects that remain after the Z‑score step.
+
+    Parameters
+    ----------
+    df               : data to harmonise – **must already be z‑scored**
+    feature_columns  : numeric feature names
+    keep_label       : if True the ‘label’ column is passed to ComBat as a
+                       biological covariate so the class signal is *preserved*.
+
+    Returns
+    -------
+    DataFrame of identical shape/order, but with ComBat‑adjusted features.
+    """
+    if not COMBAT_AVAILABLE:
+        logger.info("ComBat step skipped (neuroHarmonize unavailable).")
+        return df.copy()
+
+    # neuroHarmonize expects shape  (N_samples × N_features)
+    data_matrix = df[feature_columns].values
+
+    # --- covariate table --------------------------------------------------
+    # The batch variable **must** be called “SITE”
+    covars = pd.DataFrame({"SITE": df["session"].values})
+    # supply label as an **integer code** so harmonizationLearn treats it as numeric
+
+    if keep_label and "label" in df.columns:
+        covars["LABEL"] = df["label"].astype("category").cat.codes
+    # ----------------------------------------------------------------------
+
+    logger.info("Running ComBat (neuroHarmonize)…")
+    #
+    # harmonizationLearn returns    model, bayes_data
+    #              (N_samples × N_features)     ↑
+    #
+    _, bayes_data = harmonizationLearn(
+        data=data_matrix,
+        covars=covars,
+        eb=True          # empirical‑Bayes (standard ComBat)
+    )
+
+    df_harmonised = df.copy()
+    df_harmonised[feature_columns] = bayes_data     # ← NO .T !
+
+    return df_harmonised
 
 def normalize_data(imagery_df, baseline_df, feature_columns):
     """
@@ -134,6 +193,19 @@ def normalize_data(imagery_df, baseline_df, feature_columns):
     logger.info(f"Normalization complete: {normalization_stats['successful']} successful, "
                 f"{normalization_stats['skipped']} skipped, "
                 f"{normalization_stats['zero_std']} features with zero std")
+
+    # ----------------------  NEW  ----------------------
+    # Optional: run ComBat on the already Z‑scored data
+    normalized_df = apply_combat(normalized_df, feature_columns)
+    # ---------------------------------------------------
+
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    model_file = f"combat_model_{ts}.pkl"
+    normalized_df = apply_combat(
+        normalized_df,
+        feature_columns,
+        keep_label = True,
+                          )
 
     return normalized_df, normalization_stats
 
@@ -232,8 +304,8 @@ def main():
     """
     try:
         # 1. Define input and output paths
-        imagery_dir = "data/merged_features/12_sessions_merge_1743795360/imagery"
-        baseline_dir = "data/merged_features/12_sessions_merge_1743795360/baseline"
+        imagery_dir = "data/merged_features/14_sessions_merge_1743884222/split_set/test"
+        baseline_dir = "data/merged_features/14_sessions_merge_1743884222/split_set/baseline"
 
         # 2. Load data
         logger.info("Loading imagery task data...")
