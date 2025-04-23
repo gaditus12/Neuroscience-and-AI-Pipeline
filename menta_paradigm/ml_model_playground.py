@@ -1318,62 +1318,81 @@ class EEGAnalyzer:
 
         # Define search spaces for different models
         search_spaces = {
+            # ───────────────────────────────────────────────────────── Random Forest ──
             'RandomForest': {
-                'model': Categorical([RandomForestClassifier(random_state=42)]),
-                'model__n_estimators': Integer(50, 250),
-                'model__max_depth': Integer(2, 15), #TODO revert after checking the accuracy
-                'model__min_samples_split': Integer(2, 5),
-                'model__min_samples_leaf': Integer(1, 4),
+                'model': Categorical([RandomForestClassifier(
+                    random_state=42, n_jobs=-1)]),
+                'model__n_estimators': Integer(50, 150),  # fewer trees → less variance
+                'model__max_depth': Integer(2, 6),  # very shallow
+                'model__min_samples_split': Integer(2, 6),
+                'model__min_samples_leaf': Integer(2, 8),  # prevents tiny leaves
                 'model__class_weight': Categorical(['balanced', None]),
-                'feature_selection__k': Integer(3, 30) # TODO  revert after checking the accuracy
-            },
-            # 'SVM': {
-            #     'model': Categorical([SVC(random_state=42, probability=True)]),
-            #     'model__C': Real(0.1, 10, prior='log-uniform'),
-            #     'model__gamma': Real(1e-4, 1e-1, prior='log-uniform'),
-            #     'model__kernel': Categorical(['rbf', 'linear', 'poly']),
-            #     'model__class_weight': Categorical(['balanced', None]),
-            #     'feature_selection__k': Integer(2, 15)
-            # },
-            'ElasticNetLogReg': {
-                'model': Categorical([LogisticRegression(
-                    penalty='elasticnet', solver='saga',
-                    class_weight='balanced', max_iter=5000, random_state=42)]),
-                'model__C': Real(1e-3, 100, prior='log-uniform'),
-                'model__l1_ratio': Real(0.0, 1.0),
-                'feature_selection__k': Integer(5, 30)
+                'feature_selection__k': Integer(3, 20)
             },
 
-            # 'ExtraTrees': {
-            #     'model': Categorical([ExtraTreesClassifier(class_weight='balanced',
-            #                                                random_state=42)]),
-            #     'model__n_estimators': Integer(50, 300),
-            #     'model__max_depth': Categorical([None, 2, 4, 6, 8, 10]),
-            #     'model__min_samples_leaf': Integer(1, 5),
-            #     'feature_selection__k': Integer(5, 30)
-            # },
-            'HGBClassifier': {
-                'model': Categorical([HistGradientBoostingClassifier(
-                    class_weight='balanced', random_state=42)]),
-                'model__learning_rate': Real(0.01, 0.3, prior='log-uniform'),
-                'model__max_depth': Integer(2, 4),
-                'model__max_iter': Integer(50, 300),
-                'feature_selection__k': Integer(5, 30)
-            },
+            # ──────────────────────────────────────────────────────────────   SVM  ──
+            'SVM': {
+                'model': Categorical([SVC(
+                    random_state=42, probability=True)]),
+                'model__kernel': Categorical(['linear', 'rbf']),  # poly removed
+                'model__C': Real(1e-2, 5.0, prior = 'log-uniform'),
+        'model__gamma': Real(1e-4, 5e-2, prior = 'log-uniform'),
+        'model__class_weight': Categorical(['balanced', None]),
+        'feature_selection__k': Integer(4, 15)
+        },
 
-            # 'kNN': {
-            #     'model': Categorical([KNeighborsClassifier()]),
-            #     'model__n_neighbors': Integer(3, 15),
-            #     'model__weights': Categorical(['uniform', 'distance']),
-            #     'feature_selection__k': Integer(5, 30)
-            # },
-            # 'GaussianNB': {  # nothing to tune – still include for completeness
-            #     'model': Categorical([GaussianNB()])
-            # },
-            # 'ShrinkageLDA': {  # almost parameter‑free
-            #     'model': Categorical([LinearDiscriminantAnalysis(solver='lsqr')]),
-            #     'model__shrinkage': Categorical(['auto', None])
-            # },
+        # ─────────────────────────────────────────── Elastic‑Net Logistic Reg ──
+        'ElasticNetLogReg': {
+            'model': Categorical([LogisticRegression(
+                penalty='elasticnet', solver='saga',
+                class_weight='balanced',
+                max_iter=4000, random_state=42)]),
+            'model__C': Real(1e-2, 10.0, prior = 'log-uniform'),
+        'model__l1_ratio': Real(0.1, 0.9),  # avoid extremes
+        'feature_selection__k': Integer(5, 20)
+        },
+
+        # ───────────────────────────────────────────────────────── Extra Trees ──
+        'ExtraTrees': {
+            'model': Categorical([ExtraTreesClassifier(
+                class_weight='balanced',
+                random_state=42, n_jobs=-1)]),
+            'model__n_estimators': Integer(80, 200),
+            'model__max_depth': Integer(2, 8),
+            'model__min_samples_leaf': Integer(2, 6),
+            'feature_selection__k': Integer(5, 20)
+        },
+
+        # ────────────────────────────────────────── HistGradientBoosting ──
+        'HGBClassifier': {
+            'model': Categorical([HistGradientBoostingClassifier(
+                class_weight='balanced', random_state=42)]),
+            'model__learning_rate': Real(0.02, 0.12, prior='log-uniform'),
+            'model__max_depth': Integer(2, 4),
+            'model__max_iter': Integer(60, 150),
+            'feature_selection__k': Integer(5, 20)
+        },
+
+        # ───────────────────────────────────────────────────── k‑Nearest Nbrs ──
+        'kNN': {
+            'model': Categorical([KNeighborsClassifier()]),
+            'model__n_neighbors': Integer(5, 15),  # ≥5 to limit variance
+            'model__weights': Categorical(['uniform', 'distance']),
+            'feature_selection__k': Integer(5, 20)
+        },
+
+        # ────────────────────────────────────────────── Gaussian Naïve Bayes ──
+        'GaussianNB': {
+            'model': Categorical([GaussianNB()])
+            # no hyper‑params
+        },
+
+        # ────────────────────────────────────────────── Shrinkage LDA ──
+        'ShrinkageLDA': {
+            'model': Categorical([LinearDiscriminantAnalysis(
+                solver='lsqr')]),
+            'model__shrinkage': Categorical(['auto', 0.1, 0.3, None])
+        }
         }
 
         best_results = {}
@@ -1826,7 +1845,7 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description='EEG Data Analysis Tool')
-    parser.add_argument('--features_file', type=str, default="data/normalized_merges/14_train_comBat/normalized_imagery.csv",
+    parser.add_argument('--features_file', type=str, default="data/merged_features/14_sessions_merge_1743884222/split_set/train/train_samples_o1.csv",
                         help='Path to the CSV file containing EEG features')
     parser.add_argument('--top_n_labels', type=int, default=2,
                         help='Number of labels to analyze (default: 2)')

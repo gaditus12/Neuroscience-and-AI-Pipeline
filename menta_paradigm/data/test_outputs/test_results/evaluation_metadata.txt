@@ -1,5 +1,5 @@
-evaluation_date: 2025-04-21 14:45:05
-model_name: best_hgbclassifier_model.pkl
+evaluation_date: 2025-04-22 23:18:01
+model_name: best_svm_model.pkl
 test_data: normalized_imagery.csv
 num_samples: 22
 metrics_files: ['data/test_outputs/test_results\\test_metrics.csv', 'data/test_outputs/test_results\\classification_report.csv', 'data/test_outputs/test_results\\confusion_matrix.png']

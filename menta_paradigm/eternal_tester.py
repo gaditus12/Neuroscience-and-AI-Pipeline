@@ -1,123 +1,130 @@
-import joblib
-import pandas as pd
-import argparse
-import os
+#!/usr/bin/env python
+# evaluate_many_models.py  — v2 (saves model hyper‑parameters)
+
+import os, glob, json, argparse, joblib
 from datetime import datetime
-from sklearn.metrics import (accuracy_score, classification_report,
-                             confusion_matrix, f1_score, precision_score, recall_score)
+
+import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
+from sklearn.metrics import (accuracy_score, f1_score, precision_score,
+                             recall_score, classification_report,
+                             confusion_matrix)
+from sklearn import __version__ as sklearn_version
 
 
-def save_metrics_report(y_true, y_pred, output_dir, model_name, test_data_path):
-    """Save classification metrics and confusion matrix visualization"""
-    # Create metrics dictionary
-    metrics = {
-        'accuracy': accuracy_score(y_true, y_pred),
-        'f1_macro': f1_score(y_true, y_pred, average='macro'),
-        'precision_macro': precision_score(y_true, y_pred, average='macro'),
-        'recall_macro': recall_score(y_true, y_pred, average='macro'),
-        'f1_weighted': f1_score(y_true, y_pred, average='weighted'),
-        'precision_weighted': precision_score(y_true, y_pred, average='weighted'),
-        'recall_weighted': recall_score(y_true, y_pred, average='weighted'),
-    }
+# ─────────────────────────── helpers ──────────────────────────────────
+def _write_metrics_and_figs(y_true, y_pred, out_dir,
+                            model_name, test_csv_path):
+    """Store metrics, report, CM figure & metadata inside *out_dir*."""
+    metrics = dict(
+        accuracy           = accuracy_score (y_true, y_pred),
+        f1_macro           = f1_score       (y_true, y_pred, average='macro'),
+        precision_macro    = precision_score(y_true, y_pred, average='macro'),
+        recall_macro       = recall_score   (y_true, y_pred, average='macro'),
+        f1_weighted        = f1_score       (y_true, y_pred, average='weighted'),
+        precision_weighted = precision_score(y_true, y_pred, average='weighted'),
+        recall_weighted    = recall_score   (y_true, y_pred, average='weighted'),
+    )
+    pd.DataFrame([metrics]).to_csv(
+        os.path.join(out_dir, "test_metrics.csv"), index=False)
 
-    # Create classification report
-    report = classification_report(y_true, y_pred, output_dict=True)
+    pd.DataFrame(classification_report(
+        y_true, y_pred, output_dict=True)
+    ).T.to_csv(os.path.join(out_dir, "classification_report.csv"))
 
-    # Save metrics to CSV
-    metrics_df = pd.DataFrame([metrics])
-    metrics_file = os.path.join(output_dir, 'test_metrics.csv')
-    metrics_df.to_csv(metrics_file, index=False)
-
-    # Save full classification report
-    report_df = pd.DataFrame(report).transpose()
-    report_file = os.path.join(output_dir, 'classification_report.csv')
-    report_df.to_csv(report_file, index=True)
-
-    # Save confusion matrix visualization
-    plt.figure(figsize=(10, 8))
     cm = confusion_matrix(y_true, y_pred)
+    plt.figure(figsize=(8, 6))
     sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
                 xticklabels=sorted(set(y_true)),
                 yticklabels=sorted(set(y_true)))
     plt.title('Confusion Matrix')
-    plt.xlabel('Predicted')
-    plt.ylabel('True')
-    cm_file = os.path.join(output_dir, 'confusion_matrix.png')
-    plt.savefig(cm_file, bbox_inches='tight')
+    plt.xlabel('Predicted'); plt.ylabel('True')
+    plt.tight_layout()
+    plt.savefig(os.path.join(out_dir, "confusion_matrix.png"), dpi=300)
     plt.close()
 
-    # Create metadata file
-    metadata = {
-        'evaluation_date': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-        'model_name': os.path.basename(model_name),
-        'test_data': os.path.basename(test_data_path),
-        'num_samples': len(y_true),
-        'metrics_files': [metrics_file, report_file, cm_file]
-    }
-
-    metadata_file = os.path.join(output_dir, 'evaluation_metadata.txt')
-    with open(metadata_file, 'w') as f:
-        for k, v in metadata.items():
-            f.write(f"{k}: {v}\n")
-
-    print(f"Saved evaluation metrics to {output_dir}")
+    # minimal metadata
+    with open(os.path.join(out_dir, "evaluation_metadata.txt"), "w") as fh:
+        fh.write(f"evaluation_date : "
+                 f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        fh.write(f"model_name      : {model_name}\n")
+        fh.write(f"test_data       : {os.path.basename(test_csv_path)}\n")
+        fh.write(f"num_samples     : {len(y_true)}\n")
+        fh.write(f"sklearn_version : {sklearn_version}\n")
 
 
-def main():
-    parser = argparse.ArgumentParser(description='Predict using a saved EEG model and calculate metrics')
-    parser.add_argument('--model', type=str, default='ml_model_outputs/run_1743297511/base_randomforest_model.pkl',
-                        help='Path to the saved model (e.g., best_randomforest_model.pkl)')
-    parser.add_argument('--test_data', type=str, default='data/merged_features/47_captures/o1_47_holdout_tests.csv',
-                        help='Path to the test data CSV file')
-    parser.add_argument('--output_dir', type=str, default='data/test_outputs/test_results',
-                        help='Directory to save predictions and metrics')
+def _dump_model_params(model, out_dir):
+    """Serialize *all* hyper‑parameters to JSON (Pipeline‑aware)."""
+    # A Pipeline exposes .get_params() just like any estimator – deep=True
+    params = model.get_params(deep=True)
 
+    # Convert any non‑JSON‑serialisable values to strings
+    def make_serialisable(obj):
+        try:
+            json.dumps(obj); return obj
+        except TypeError:
+            return str(obj)
+
+    params_serialisable = {k: make_serialisable(v) for k, v in params.items()}
+
+    with open(os.path.join(out_dir, "model_params.json"), "w") as fh:
+        json.dump(params_serialisable, fh, indent=2, sort_keys=True)
+
+
+def _evaluate_one(model_path, X, y, out_root, test_csv):
+    """Load *model_path*, predict on *X*, write artefacts under *out_root*."""
+    model_name = os.path.splitext(os.path.basename(model_path))[0]
+    stamp      = datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_dir    = os.path.join(out_root, f"{model_name}_{stamp}")
+    os.makedirs(out_dir, exist_ok=True)
+
+    print(f"→ Evaluating {model_name}")
+    model      = joblib.load(model_path)
+    y_pred     = model.predict(X)
+
+    # predictions
+    pd.DataFrame(dict(true=y, pred=y_pred)).to_csv(
+        os.path.join(out_dir, "predictions.csv"), index=False)
+
+    # metrics, figures & params
+    _write_metrics_and_figs(y, y_pred, out_dir, model_name, test_csv)
+    _dump_model_params(model, out_dir)
+
+    print(f"   artefacts in {out_dir}\n")
+
+
+# ───────────────────────────── main ──────────────────────────────────
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="Evaluate every best*_model.pkl found in a directory")
+    parser.add_argument("--models_dir", required=False, default='ml_model_outputs/comBat_100BO_kfolds',
+                        help="Directory that contains the pickled models")
+    parser.add_argument("--test_data", required=False, default="data/normalized_merges/14_test_comBat/normalized_imagery.csv",
+                        help="CSV with test‑set features + ground‑truth labels")
+    parser.add_argument("--output_root", default="data/test_outputs/model_evaluations",
+                        help="Root folder where evaluation artefacts are stored")
     args = parser.parse_args()
 
-    # Create output directory if it doesn't exist
-    os.makedirs(args.output_dir, exist_ok=True)
+    # discover models
+    pattern     = os.path.join(os.path.abspath(args.models_dir),
+                               "**", "best*_model.pkl")
+    model_files = sorted(glob.glob(pattern, recursive=True))
+    if not model_files:
+        raise FileNotFoundError(f"No 'best*_model.pkl' under {args.models_dir}")
 
-    # Load the trained model
-    model = joblib.load(args.model)
+    # load test‑set once
+    test_df      = pd.read_csv(args.test_data)
+    meta_cols    = ['label', 'channel', 'session']
+    feature_cols = [c for c in test_df.columns if c not in meta_cols]
+    if not feature_cols:
+        raise ValueError("Could not detect feature columns in the test CSV")
+    X_test, y_test = test_df[feature_cols], test_df['label']
 
-    # Load test data
-    test_df = pd.read_csv(args.test_data)
-
-    # Identify feature columns and labels
-    metadata_columns = ['label', 'channel', 'session']
-    feature_columns = [col for col in test_df.columns if col not in metadata_columns]
-
-    if not feature_columns:
-        raise ValueError("No feature columns found in the test data")
-
-    X_test = test_df[feature_columns]
-
-    # Generate predictions
-    predictions = model.predict(X_test)
-
-    # Create output DataFrame
-    output_df = test_df.copy()
-    output_df['prediction'] = predictions
-
-    # Save predictions
-    predictions_file = os.path.join(args.output_dir, 'predictions.csv')
-    output_df.to_csv(predictions_file, index=False)
-    print(f"Predictions saved to {predictions_file}")
-
-    # Calculate metrics if labels are available
-    if 'label' in test_df.columns:
-        y_true = test_df['label']
-        y_pred = predictions
-
-        # Save metrics and visualizations
-        save_metrics_report(y_true, y_pred, args.output_dir, args.model, args.test_data)
-        print("\nClassification Metrics:")
-        print(classification_report(y_true, y_pred))
-    else:
-        print("\nNo 'label' column found in test data - skipping metrics calculation")
-
-
-if __name__ == '__main__':
-    main()
+    # evaluate all models
+    os.makedirs(args.output_root, exist_ok=True)
+    for mf in model_files:
+        try:
+            _evaluate_one(mf, X_test, y_test, args.output_root, args.test_data)
+        except Exception as exc:
+            print(f"!! {os.path.basename(mf)} failed: {exc}\n")
