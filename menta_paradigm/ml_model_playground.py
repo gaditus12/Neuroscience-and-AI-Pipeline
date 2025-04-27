@@ -11,6 +11,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import seaborn as sns
 import joblib
+import json
 import matplotlib.patches as patches
 import matplotlib.transforms as transforms
 from sklearn.model_selection import LeaveOneGroupOut   # NEW
@@ -31,7 +32,8 @@ from sklearn.model_selection import LeaveOneOut, cross_val_score, StratifiedKFol
 from sklearn.feature_selection import SelectKBest, f_classif, mutual_info_classif
 from sklearn.preprocessing import StandardScaler
 from sklearn.feature_selection import SelectKBest, f_classif
-from sklearn.metrics import precision_recall_fscore_support, confusion_matrix, classification_report
+from sklearn.metrics import precision_recall_fscore_support, confusion_matrix, classification_report, f1_score, \
+    accuracy_score
 from sklearn.pipeline import Pipeline
 # scikit-optimize for Bayesian optimization
 try:
@@ -42,6 +44,9 @@ except ImportError:
     SKOPT_AVAILABLE = False
     print("Warning: scikit-optimize not available. Install with 'pip install scikit-optimize' to use hyperparameter optimization.")
 
+from sklearn.model_selection import (
+        LeaveOneGroupOut, StratifiedGroupKFold, GroupShuffleSplit,
+        StratifiedKFold)
 class EEGAnalyzer:
     def __init__(self,
                  features_file,
@@ -136,7 +141,7 @@ class EEGAnalyzer:
                 self.X = self.df[self.feature_columns]
                 self.y = self.df["label"]
 
-    def preprocess_data(self):
+    def preprocess_data(self, debug_plots_only=True):
         print("\n---- PREPROCESSING DATA ----")
         # This method should only perform exploratory analysis or simple data cleaning.
         # The actual standardization will occur in cross-validation.
@@ -159,10 +164,11 @@ class EEGAnalyzer:
 
         # For backward compatibility with the rest of the code, we'll still fit a scaler
         # but with a clear warning that it should not be used for evaluation
-        self.X_scaled = self.scaler.fit_transform(self.X)
-        self.X_scaled_df = pd.DataFrame(self.X_scaled, columns=self.feature_columns)
-        print("\nWARNING: Global standardization performed for visualization purposes only.")
-        print("DO NOT use self.X_scaled for model evaluation/training.")
+        if debug_plots_only:
+            self.X_scaled = self.scaler.fit_transform(self.X)
+            self.X_scaled_df = pd.DataFrame(self.X_scaled, columns=self.feature_columns)
+            print("\nWARNING: Global standardization performed for visualization purposes only.")
+            print("DO NOT use self.X_scaled for model evaluation/training.")
     def feature_selection(self):
         """
         Feature selection method - To be called before cross-validation
@@ -198,6 +204,35 @@ class EEGAnalyzer:
 
         print("\nWARNING: This is preliminary analysis only. Proper feature selection")
         print("will be performed within each fold of cross-validation.")
+
+    # ─── NEW util  ──────────────────────────────────────────────────────────
+    def _get_nested_splitters(self, groups):
+        """
+        Decide which outer / inner CV objects to use, given current
+        self.cv_method and the session-id array `groups`.
+        Returns: (outer_cv, inner_cv)
+        """
+        if self.cv_method == "loso":
+            outer = LeaveOneGroupOut()  # each outer fold = 1 session
+            #   inner: random 20 % of the *remaining* sessions
+            inner = GroupShuffleSplit(n_splits=3,
+                                      test_size=0.20,
+                                      random_state=42)
+        elif self.cv_method == "kfold":
+            outer = StratifiedGroupKFold(
+                n_splits=self.kfold_splits, shuffle=True, random_state=42)
+            inner = StratifiedGroupKFold(
+                n_splits=3, shuffle=True, random_state=24)
+        elif self.cv_method == "loo":
+            outer = LeaveOneGroupOut()
+            inner = GroupShuffleSplit(n_splits=3,
+                                      test_size=0.20,
+                                      random_state=42)
+        else:  # "holdout" → no outer CV, keep inner only
+            outer = None
+            inner = StratifiedKFold(n_splits=3, shuffle=True, random_state=42)
+
+        return outer, inner
 
     class DummySelector:
         def __init__(self, feature_columns, selected_features):
@@ -865,6 +900,35 @@ class EEGAnalyzer:
 
         return metrics
 
+    # ── NEW helper ────────────────────────────────────────────────────────────────
+    def _persist_nested_cv_log(self, model_name, outer_results):
+        """
+        outer_results: list[dict] with keys
+            'fold', 'inner_best_f1', 'outer_f1', 'inner_best_params'
+        """
+        import pandas as pd, os, json, numpy as np
+        df = pd.DataFrame(outer_results)
+
+        # add global summary (last row)
+        df_summary = pd.DataFrame([{
+            'fold': 'MEAN±STD',
+            'inner_best_f1': f"{df.inner_best_f1.mean():.3f} ± {df.inner_best_f1.std(ddof=0):.3f}",
+            'outer_f1': f"{df.outer_f1.mean():.3f} ± {df.outer_f1.std(ddof=0):.3f}",
+            'inner_best_params': ''
+        }])
+        out_df = pd.concat([df, df_summary], ignore_index=True)
+
+        # pretty-print params as JSON
+        out_df['inner_best_params'] = out_df['inner_best_params'].apply(
+            lambda p: json.dumps(p, default=str) if isinstance(p, dict) else p)
+
+        out_file = os.path.join(
+            self.run_directory,
+            f"nested_cv_log_{model_name.lower()}.csv"
+        )
+        out_df.to_csv(out_file, index=False)
+        print(f"✓ Saved nested-CV log for {model_name} → {out_file}")
+
     def visualize_confusion_matrix(self):
         """Visualize confusion matrix for the best label combination"""
         print("\n---- VISUALIZING CONFUSION MATRIX ----")
@@ -1322,12 +1386,12 @@ class EEGAnalyzer:
             'RandomForest': {
                 'model': Categorical([RandomForestClassifier(
                     random_state=42, n_jobs=-1)]),
-                'model__n_estimators': Integer(50, 150),  # fewer trees → less variance
-                'model__max_depth': Integer(2, 6),  # very shallow
+                'model__n_estimators': Categorical([50]),  # fewer trees → less variance
+                'model__max_depth': Categorical([4]),  # very shallow
                 'model__min_samples_split': Integer(2, 6),
                 'model__min_samples_leaf': Integer(2, 8),  # prevents tiny leaves
-                'model__class_weight': Categorical(['balanced', None]),
-                'feature_selection__k': Integer(3, 20)
+                'model__class_weight': Categorical(['balanced']),
+                'feature_selection__k': Categorical([20]) #TODO change back if you want search on that
             },
 
             # ──────────────────────────────────────────────────────────────   SVM  ──
@@ -1341,13 +1405,13 @@ class EEGAnalyzer:
         'feature_selection__k': Integer(4, 15)
         },
 
-        # ─────────────────────────────────────────── Elastic‑Net Logistic Reg ──
+        # # ─────────────────────────────────────────── Elastic‑Net Logistic Reg ──
         'ElasticNetLogReg': {
             'model': Categorical([LogisticRegression(
                 penalty='elasticnet', solver='saga',
                 class_weight='balanced',
                 max_iter=4000, random_state=42)]),
-            'model__C': Real(1e-2, 10.0, prior = 'log-uniform'),
+            'model__C': Real(1e-2, 5.0, prior = 'log-uniform'),
         'model__l1_ratio': Real(0.1, 0.9),  # avoid extremes
         'feature_selection__k': Integer(5, 20)
         },
@@ -1369,7 +1433,7 @@ class EEGAnalyzer:
                 class_weight='balanced', random_state=42)]),
             'model__learning_rate': Real(0.02, 0.12, prior='log-uniform'),
             'model__max_depth': Integer(2, 4),
-            'model__max_iter': Integer(60, 150),
+            'model__max_iter': Integer(60, 100),
             'feature_selection__k': Integer(5, 20)
         },
 
@@ -1395,87 +1459,125 @@ class EEGAnalyzer:
         }
         }
 
-        best_results = {}
-        all_results = {}
+        outer_cv, inner_cv_proto = self._get_nested_splitters(
+            df_best["session"].values)  # session IDs array
 
-        # Loop over each model type with an outer tqdm progress bar
-        for model_name, space in tqdm(search_spaces.items(), desc="Optimizing models"):
-            print(f"\nOptimizing {model_name}...")
+        best_results, all_results = {}, {}
 
-            # Create the pipeline; note that the classifier will be replaced during optimization.
-            pipeline = Pipeline([
-                ('scaler', StandardScaler()),
-                ('feature_selection', SelectKBest(f_classif)),
-                ('model', RandomForestClassifier())  # placeholder
-            ])
+        for model_name, space in tqdm(search_spaces.items(),
+                                      desc="Optimising (nested CV)"):
+            print(f"\n⟹  Optimising {model_name}")
 
-            # Define a custom callback for progress updates if supported.
-            # This callback function updates a tqdm bar.
-            def tqdm_callback(res):
-                # Each time the callback is called, update the inner progress bar by one iteration.
-                inner_bar.update(1)
+            outer_scores, outer_std, fold_estimators = [], [], []
+            outer_log = []  # ← new: per-model log
 
-            # Attempt to create an inner tqdm progress bar for n_iter iterations.
-            inner_bar = tqdm(total=n_iter, desc=f"{model_name} iterations", leave=False)
-            try:
-                opt = BayesSearchCV(
-                    pipeline,
-                    space,
-                    n_iter=n_iter,
-                    cv=cv,
-                    scoring='f1_macro',
-                    n_jobs=-1,
-                    verbose=1,
-                    random_state=42,
-                    callback=[tqdm_callback]
-                )
-            except TypeError as e:
-                print(
-                    "Callback parameter not supported in this version of BayesSearchCV. Proceeding without inner-loop progress updates.")
-                opt = BayesSearchCV(
-                    pipeline,
-                    space,
-                    n_iter=n_iter,
-                    cv=cv,
-                    scoring='f1_macro',
-                    n_jobs=-1,
-                    verbose=1,
-                    random_state=42
-                )
-                # Manually update inner_bar in a loop is not possible here.
-
-            # Fit the search
-            if self.cv_method == "loso":
-                groups_best = df_best["session"].values
-                opt.fit(X_best, y_best, groups=groups_best)
+            # ───── outer loop (may be None for 'holdout') ───────────────────────
+            if outer_cv is None:  # holdout   – single dev/test split
+                outer_indices = [(np.arange(len(X_best)), np.arange(len(X_best)))]
             else:
-                opt.fit(X_best, y_best)
-            inner_bar.close()
+                outer_indices = outer_cv.split(X_best, y_best,
+                                               groups=df_best["session"].values)
 
-            print(f"Best {model_name} score: {opt.best_score_:.4f}")
-            print(f"Best {model_name} parameters: {opt.best_params_}")
+            for fold, (tr_idx, te_idx) in enumerate(outer_indices, start=1):
+                X_tr, X_te = X_best.iloc[tr_idx], X_best.iloc[te_idx]
+                y_tr, y_te = y_best.iloc[tr_idx], y_best.iloc[te_idx]
 
-            # Store the best results
+                # make an *inner* CV object limited to the training sessions
+                if outer_cv is None:
+                    inner_cv = inner_cv_proto  # plain StratKFold
+                else:
+                    inner_cv = list(
+                        inner_cv_proto.split(
+                            X_tr, y_tr,
+                            groups=df_best["session"].values[tr_idx])
+                    )
+
+                # ----------------  inner Bayesian search  ----------------------
+                pipe = Pipeline([
+                    ('scaler', StandardScaler()),
+                    ('feature_selection', SelectKBest(f_classif)),
+                    ('model', RandomForestClassifier())  # placeholder, overwritten by BayesSearch
+                ])
+
+                opt = BayesSearchCV(
+                    pipe,
+                    space,
+                    n_iter=n_iter,
+                    cv=inner_cv,
+                    scoring='f1_macro',
+                    n_jobs=-1,
+                    random_state=42,
+                    verbose=0
+                )
+                opt.fit(X_tr, y_tr)
+
+                # unbiased score on the *outer-test* portion
+                y_pred = opt.predict(X_te)
+                outer_acc = accuracy_score(y_te, y_pred)
+                prec, rec, f1c, _ = precision_recall_fscore_support(
+                    y_te, y_pred, average='macro')
+
+                outer_f1 = f1_score(y_te, y_pred, average='macro')
+                inner_best_f = opt.best_score_
+
+                outer_scores.append(outer_f1)
+                fold_estimators.append(opt.best_estimator_)
+
+                outer_log.append({
+                    'fold': fold,
+                    'inner_best_f1': round(inner_best_f, 3),
+                    'outer_f1': round(outer_f1, 3),
+                    'outer_acc': round(outer_acc, 3),
+                    'outer_prec': round(prec, 3),
+                    'outer_recall': round(rec, 3),
+                    'inner_best_params': opt.best_params_,
+
+                })
+                labels = y_te.unique()  # ['m_et_s', 'n_3_s']
+                prec_c, rec_c, f1_c, _ = precision_recall_fscore_support(
+                    y_te, y_pred, average=None, labels=labels)
+
+                for lbl, p, r, f in zip(labels, prec_c, rec_c, f1_c):
+                    outer_log[-1][f'f1_{lbl}'] = round(f, 3)
+                    outer_log[-1][f'prec_{lbl}'] = round(p, 3)
+                    outer_log[-1][f'recall_{lbl}'] = round(r, 3)
+
+                print(f"   fold {fold}: best inner F-score = {opt.best_score_:.3f} | "
+                      f"outer F-score = {outer_scores[-1]:.3f}")
+
+            # summary across outer folds
+            mu, sigma = np.mean(outer_scores), np.std(outer_scores)
+            print(f"→ Nested-CV F1 for {model_name}: {mu:.3f} ± {sigma:.3f}")
+
             best_results[model_name] = {
-                'model': opt.best_estimator_,
-                'params': opt.best_params_,
-                'score': opt.best_score_
+                'outer_mean_f1': mu,
+                'outer_std_f1': sigma,
+                'per_fold_f1': outer_scores,
+                'best_fold_model': fold_estimators[int(np.argmax(outer_scores))]
             }
 
-            # Store all results for later visualization
+            # keep raw BayesSearch history if you wish
             all_results[model_name] = {
                 'params': opt.cv_results_['params'],
                 'scores': opt.cv_results_['mean_test_score']
             }
-
+            # NEW – save per-fold inner / outer log
+            self._persist_nested_cv_log(model_name, outer_log)
             # Save the best model to a file
             import joblib
             joblib.dump(opt.best_estimator_, f"{self.run_directory}/best_{model_name.lower()}_model.pkl")
 
+        # pick overall winner
+        best_model_name = max(best_results, key=lambda m: best_results[m]['outer_mean_f1'])
+        print(f"\n★★  Best (nested-CV) model = {best_model_name}  "
+              f"{best_results[best_model_name]['outer_mean_f1']:.3f} ± "
+              f"{best_results[best_model_name]['outer_std_f1']:.3f}")
+
+
         # Determine the best model overall
-        best_model_name = max(best_results, key=lambda x: best_results[x]['score'])
-        best_model = best_results[best_model_name]['model']
-        best_score = best_results[best_model_name]['score']
+        # (store the real estimator + use the mean outer F1)
+        best_model = best_results[best_model_name]['best_fold_model']  # ← a Pipeline
+        best_score = best_results[best_model_name]['outer_mean_f1']
 
         print(f"\nBest overall model: {best_model_name}")
         print(f"Best overall score (F1): {best_score:.4f}")
@@ -1616,6 +1718,122 @@ class EEGAnalyzer:
 
         # Save feature importance to CSV
         feature_importance.to_csv(f"{self.run_directory}/best_model_feature_importance.csv", index=False)
+
+    # ------------------------------------------------------------
+    #   ❶  Violin / strip plot of LOSO (or k-fold) outer scores
+    # ------------------------------------------------------------
+    def plot_outer_fold_distribution(self):
+        """
+        Draw a violin/strip plot of the outer-fold F1 scores for the
+        best model picked in optimise_hyperparameters().
+        Works for LOSO or k-fold.
+        """
+        if not hasattr(self, 'optimization_results'):
+            print("Run optimise_hyperparameters first.")
+            return
+
+        best_name = self.optimization_results['best_model_name']
+        fold_scores = self.optimization_results['best_results'  # dict from optimise_hyperparameters
+        ][best_name]['per_fold_f1']
+
+        import matplotlib.pyplot as plt, seaborn as sns, numpy as np
+        plt.figure(figsize=(5, 6))
+        sns.violinplot(data=fold_scores, inner=None, color='skyblue')
+        sns.stripplot(data=fold_scores, color='black', size=6, jitter=False)
+
+        plt.ylabel('Macro-F1 (outer fold)')
+        plt.title(f'{best_name} – distribution across {len(fold_scores)} outer folds')
+        plt.ylim(0, 1)
+        out_file = f"{self.run_directory}/outer_fold_f1_distribution.png"
+        plt.savefig(out_file, dpi=300, bbox_inches='tight')
+        plt.close()
+        print(f"Saved violin plot →  {out_file}")
+
+    # ------------------------------------------------------------
+    #   ❷  Permutation test (label shuffle)
+    # ------------------------------------------------------------
+    def permutation_test_best_model(self, n_perm=1000, random_state=42):
+        """
+        Runs a label-shuffle test on the *best optimised pipeline*
+        using the same cross-validation splitter (LOSO or k-fold).
+
+        Returns
+        -------
+        p_value   : fraction of permutations whose mean F1 ≥ observed
+        """
+        if not hasattr(self, 'optimization_results'):
+            print("Run optimise_hyperparameters first.")
+            return
+
+        rng = np.random.default_rng(random_state)
+        best_pipe = self.optimization_results['best_model']
+        best_name = self.optimization_results['best_model_name']
+
+        # data for the winning label combination
+        df_best = self.df[self.df["label"].isin(self.best_labels)]
+        X = df_best[self.feature_columns].values
+        y = df_best["label"].values
+        groups = df_best["session"].values if self.cv_method == 'loso' else None
+
+        # choose the same outer splitter
+        if self.cv_method == 'loso':
+            outer_splitter = LeaveOneGroupOut()
+            split_iter = outer_splitter.split(X, y, groups)
+        else:
+            outer_splitter = StratifiedKFold(n_splits=self.kfold_splits, shuffle=True,
+                                             random_state=123)
+            split_iter = outer_splitter.split(X, y)
+
+        # --- observed score -------------------------------------------------
+        from sklearn.metrics import f1_score
+        obs_scores = []
+        for tr, te in split_iter:
+            best_pipe.fit(X[tr], y[tr])
+            obs_scores.append(f1_score(y[te], best_pipe.predict(X[te]),
+                                       average='macro'))
+        obs_mean = np.mean(obs_scores)
+
+        print(f"Observed mean outer-fold F1 for {best_name}: {obs_mean:.3f}")
+
+        # --- permutations ---------------------------------------------------
+        null_means = []
+        for p in tqdm(range(n_perm), desc="Permutations"):
+            y_perm = rng.permutation(y)  # shuffle labels globally
+            split_iter = (outer_splitter.split(X, y_perm, groups)
+                          if groups is not None else
+                          outer_splitter.split(X, y_perm))
+
+            fold_f1 = []
+            for tr, te in split_iter:
+                best_pipe.fit(X[tr], y_perm[tr])
+                fold_f1.append(
+                    f1_score(y_perm[te], best_pipe.predict(X[te]),
+                             average='macro')
+                )
+            null_means.append(np.mean(fold_f1))
+
+        null_means = np.array(null_means)
+        p_val = (np.sum(null_means >= obs_mean) + 1) / (n_perm + 1)
+        print(f"Permutation-test p-value: {p_val:.4f}")
+
+        # -------- histogram ------------
+        import matplotlib.pyplot as plt
+        plt.figure(figsize=(6, 4))
+        plt.hist(null_means, bins=30, alpha=0.7)
+        plt.axvline(obs_mean, color='red', lw=2,
+                    label=f'Observed ({obs_mean:.3f})')
+        plt.xlabel('Mean macro-F1 (null)')
+        plt.ylabel('Count')
+        plt.title(f'Permutation test – {best_name}\n p = {p_val:.4f}')
+        plt.legend()
+        out_file = f"{self.run_directory}/permutation_histogram_{best_name}.png"
+        plt.savefig(out_file, dpi=300, bbox_inches='tight')
+        plt.close()
+        print(f"Saved permutation histogram →  {out_file}")
+
+        # store for later if you like
+        self.permutation_p_value = p_val
+        return p_val
 
     def evaluate_best_model(self):
         """
@@ -1812,6 +2030,13 @@ class EEGAnalyzer:
         self.visualize_metrics_comparison()
         self.export_results()
 
+        # ---------------------------------------------
+        #   extra sanity-checks / visual diagnostics
+        # ---------------------------------------------
+        if optimize_hyperparams:
+            self.plot_outer_fold_distribution()
+            self.permutation_test_best_model(n_perm=1000)
+
         print("\n---- ANALYSIS COMPLETE ----")
         print(f"Most separable label combination: {self.best_labels}")
         best_model = self.detailed_results[self.best_labels]['best_model']
@@ -1843,22 +2068,28 @@ class EEGAnalyzer:
 # STEP 3: Update the main script to accept a hyperparameter optimization flag
 if __name__ == "__main__":
     import argparse
+    import time
 
+    # parser.add_argument('--features_file', type=str, default="data/normalized_merges/14_full_o1_comBat/normalized_imagery.csv",
+    # parser.add_argument('--features_file', type=str, default="data/merged_features/14_sessions_merge_1743884222/59_balanced_o1.csv",
+
+
+    start_time=time.time()
     parser = argparse.ArgumentParser(description='EEG Data Analysis Tool')
-    parser.add_argument('--features_file', type=str, default="data/merged_features/14_sessions_merge_1743884222/split_set/train/train_samples_o1.csv",
+    parser.add_argument('--features_file', type=str, default="data/normalized_merges/14_all_channels/po4_norm-ComBat.csv",
                         help='Path to the CSV file containing EEG features')
     parser.add_argument('--top_n_labels', type=int, default=2,
                         help='Number of labels to analyze (default: 2)')
-    parser.add_argument('--n_features', type=int, default=6,
+    parser.add_argument('--n_features', type=int, default=10,
                         help='Number of top features to select (default: 8)')
     parser.add_argument('--channel_approach', type=str, default="pooled",
                         choices=["pooled", "separate", "features"],
                         help='How to handle channel data (default: pooled)')
-    parser.add_argument('--cv_method', type=str, default="loo",
+    parser.add_argument('--cv_method', type=str, default="loso",
                         choices=["loo", "kfold", "holdout", 'loso'],
                         help='Cross-validation method (default: loo)')
-    parser.add_argument('--cv_version', type=str, default='extended', choices=['extended', 'simple'],help='Cross-validation method (default: extended)')
-    parser.add_argument('--kfold_splits', type=int, default=6,
+    parser.add_argument('--cv_version', type=str, default='simple', choices=['extended', 'simple'],help='Cross-validation method (default: extended)')
+    parser.add_argument('--kfold_splits', type=int, default=7,
                         help='Number of splits for k-fold cross-validation (default: 5)')
     parser.add_argument('--test_size', type=float, default=0.25,
                         help='Test set size for holdout validation (default: 0.2)')
@@ -1881,3 +2112,4 @@ if __name__ == "__main__":
     )
 
     analyzer.run_complete_analysis(optimize_hyperparams=args.optimize, n_iter=args.n_iter)
+    print(f'Analysis took  {(time.time() - start_time):.2f} seconds')

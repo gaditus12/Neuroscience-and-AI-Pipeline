@@ -1,4 +1,10 @@
 import os
+import argparse, os, sys
+from pathlib import Path
+from datetime import datetime
+import pandas as pd
+import logging
+
 import pandas as pd
 import numpy as np
 from datetime import datetime
@@ -50,6 +56,50 @@ def load_data(directory):
         logger.error(f"Error loading data from {directory}: {e}")
         raise
 
+
+# ----------------------------------------------------------------------
+def _normalise_one_csv(csv_path: Path,
+                       baseline_df: pd.DataFrame,
+                       steps: str,
+                       out_dir: Path) -> None:
+    """
+    Load *one* imagery CSV, run the requested normalisation
+    pipeline(s), and save result(s) next to `out_dir`.
+
+    Parameters
+    ----------
+    csv_path    : Path to imagery file
+    baseline_df : full baseline table (already loaded once)
+    steps       : 'z' | 'combat' | 'both'
+    out_dir     : root output directory
+    """
+    logger.info(f"→  processing {csv_path.name}")
+    img_df   = pd.read_csv(csv_path)
+    feat_cols = identify_feature_columns(img_df)
+
+    # --- Z-score (always if 'z' in steps) ------------------------------
+    if steps in {"z", "both"}:
+        z_df, stats = normalize_data(img_df, baseline_df, feat_cols,
+                                     run_combat=False)
+        z_out = out_dir / f"{csv_path.stem}_norm-Z.csv"
+        z_df.to_csv(z_out, index=False)
+        logger.info(f"   saved Z-scored   →  {z_out.name}")
+
+    # --- ComBat (optionally after Z) -----------------------------------
+    if steps in {"combat", "both"}:
+
+        if steps == "both":
+            # Z-scored already; now harmonise that
+            combat_input = z_df
+            suffix = "Z_ComBat"
+        else:  # steps == "combat"  →  NO Z-score
+            combat_input = img_df.copy()
+            suffix = "ComBat"
+
+        cb_df = apply_combat(combat_input, feat_cols, keep_label=True)
+        cb_out = out_dir / f"{csv_path.stem}_norm-{suffix}.csv"
+        cb_df.to_csv(cb_out, index=False)
+        logger.info(f"   saved ComBat file →  {cb_out.name}")
 
 def identify_feature_columns(df):
     """
@@ -122,7 +172,10 @@ def apply_combat(df: pd.DataFrame,
 
     return df_harmonised
 
-def normalize_data(imagery_df, baseline_df, feature_columns):
+def normalize_data(imagery_df: pd.DataFrame,
+                   baseline_df: pd.DataFrame,
+                   feature_columns: list[str],
+                   run_combat: bool = True):
     """
     Perform within-session Z-score normalization using baseline statistics.
 
@@ -194,20 +247,24 @@ def normalize_data(imagery_df, baseline_df, feature_columns):
                 f"{normalization_stats['skipped']} skipped, "
                 f"{normalization_stats['zero_std']} features with zero std")
 
-    # ----------------------  NEW  ----------------------
-    # Optional: run ComBat on the already Z‑scored data
-    normalized_df = apply_combat(normalized_df, feature_columns)
-    # ---------------------------------------------------
+    if not run_combat:
+        return normalized_df, normalization_stats
+    elif run_combat:
 
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    model_file = f"combat_model_{ts}.pkl"
-    normalized_df = apply_combat(
-        normalized_df,
-        feature_columns,
-        keep_label = True,
-                          )
+        # ----------------------  NEW  ----------------------
+        # Optional: run ComBat on the already Z‑scored data
+        normalized_df = apply_combat(normalized_df, feature_columns)
+        # ---------------------------------------------------
 
-    return normalized_df, normalization_stats
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        model_file = f"combat_model_{ts}.pkl"
+        normalized_df = apply_combat(
+            normalized_df,
+            feature_columns,
+            keep_label = True,
+                              )
+
+        return normalized_df, normalization_stats
 
 
 def save_normalized_data(normalized_df, stats, output_dir=None):
@@ -298,45 +355,56 @@ def verify_data_integrity(imagery_df, baseline_df):
     return not issues_found
 
 
+
+# ----------------------------------------------------------------------
 def main():
-    """
-    Main function to execute the normalization process.
-    """
-    try:
-        # 1. Define input and output paths
-        imagery_dir = "data/merged_features/14_sessions_merge_1743884222/split_set/test"
-        baseline_dir = "data/merged_features/14_sessions_merge_1743884222/split_set/baseline"
+    ap = argparse.ArgumentParser(
+        description="Z-score / ComBat EEG normaliser"
+    )
+    ap.add_argument("--imagery",
+                    help="CSV file *or* directory of imagery CSVs", default='data/merged_features/14_sessions_merge_1743884222/channels', required=False)
+    ap.add_argument("--baseline",
+                    default="data/merged_features/14_sessions_merge_1743884222/merged_features_baseline_post.csv",
+                    help="baseline CSV (merged over sessions)")
+    ap.add_argument("--steps",
+                    choices=["z", "combat", "both"],
+                    default="combat",
+                    help="which normalisation stages to run")
+    ap.add_argument("--out",
+                    default=None,
+                    help="output directory (default: "
+                         "data/normalized_merges/<timestamp>/)")
+    args = ap.parse_args()
 
-        # 2. Load data
-        logger.info("Loading imagery task data...")
-        imagery_df = load_data(imagery_dir)
+    # ----- paths -------------------------------------------------------
+    imag_path = Path(args.imagery)
+    if not imag_path.exists():
+        logger.error("Imagery path not found: %s", imag_path)
+        sys.exit(1)
 
-        logger.info("Loading baseline data...")
-        baseline_df = load_data(baseline_dir)
+    out_root = Path(args.out or
+                    f"data/normalized_merges/normalization_{datetime.now():%Y%m%d_%H%M%S}")
+    out_root.mkdir(parents=True, exist_ok=True)
 
-        # 3. Identify feature columns
-        feature_columns = identify_feature_columns(imagery_df)
+    # ----- load baseline once -----------------------------------------
+    logger.info("Loading baseline file: %s", args.baseline)
+    baseline_df = pd.read_csv(args.baseline)
 
-        # 4. Verify data integrity
-        logger.info("Verifying data integrity...")
-        verify_data_integrity(imagery_df, baseline_df)
+    # ----- iterate over imagery CSVs ----------------------------------
+    if imag_path.is_file():
+        _normalise_one_csv(imag_path, baseline_df, args.steps, out_root)
+    else:  # directory
+        csv_files = sorted(p for p in imag_path.glob("*.csv"))
+        if not csv_files:
+            logger.error("No CSVs found in directory %s", imag_path)
+            sys.exit(1)
 
-        # 5. Perform normalization
-        logger.info("Performing within-session Z-score normalization...")
-        normalized_df, stats = normalize_data(imagery_df, baseline_df, feature_columns)
+        for csv in csv_files:
+            _normalise_one_csv(csv, baseline_df, args.steps, out_root)
 
-        # 6. Save results
-        logger.info("Saving normalized data...")
-        timestamp = datetime.now().strftime("%Y%m%d_%H")
-        output_dir = f"data/normalized_merges/normalization_{timestamp}"
-        save_normalized_data(normalized_df, stats, output_dir)
-
-        logger.info("Normalization process completed successfully!")
-
-    except Exception as e:
-        logger.error(f"Error in normalization process: {e}", exc_info=True)
-        raise
+    logger.info("🎉  Finished – results in %s", out_root)
 
 
+# ----------------------------------------------------------------------
 if __name__ == "__main__":
     main()
