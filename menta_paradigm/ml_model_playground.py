@@ -909,11 +909,17 @@ class EEGAnalyzer:
         import pandas as pd, os, json, numpy as np
         df = pd.DataFrame(outer_results)
 
+        # ----- weighted mean / std using n_samples -----
+        w = df['n_samples'].to_numpy()
+        mu_w = np.average(df['outer_f1'], weights=w)
+        sigma_w = np.sqrt(np.average((df['outer_f1'] - mu_w) ** 2, weights=w))
+
         # add global summary (last row)
         df_summary = pd.DataFrame([{
             'fold': 'MEAN±STD',
-            'inner_best_f1': f"{df.inner_best_f1.mean():.3f} ± {df.inner_best_f1.std(ddof=0):.3f}",
-            'outer_f1': f"{df.outer_f1.mean():.3f} ± {df.outer_f1.std(ddof=0):.3f}",
+            'inner_best_f1': f"{np.average(df.inner_best_f1, weights=w):.3f} ± "
+                             f"{np.sqrt(np.average((df.inner_best_f1 -np.average(df.inner_best_f1, weights=w)) ** 2,weights=w)):.3f}",
+            'outer_f1': f"{mu_w:.3f} ± {sigma_w:.3f}",
             'inner_best_params': ''
         }])
         out_df = pd.concat([df, df_summary], ignore_index=True)
@@ -1468,7 +1474,7 @@ class EEGAnalyzer:
                                       desc="Optimising (nested CV)"):
             print(f"\n⟹  Optimising {model_name}")
 
-            outer_scores, outer_std, fold_estimators = [], [], []
+            outer_scores, outer_std, fold_estimators, fold_sizes= [], [], [], []
             outer_log = []  # ← new: per-model log
 
             # ───── outer loop (may be None for 'holdout') ───────────────────────
@@ -1521,10 +1527,13 @@ class EEGAnalyzer:
                 inner_best_f = opt.best_score_
 
                 outer_scores.append(outer_f1)
+                fold_sizes.append(len(te_idx))  # <-- add this
+
                 fold_estimators.append(opt.best_estimator_)
 
                 outer_log.append({
                     'fold': fold,
+                    'n_samples': len(te_idx),  # ← new column
                     'inner_best_f1': round(inner_best_f, 3),
                     'outer_f1': round(outer_f1, 3),
                     'outer_acc': round(outer_acc, 3),
@@ -1546,7 +1555,9 @@ class EEGAnalyzer:
                       f"outer F-score = {outer_scores[-1]:.3f}")
 
             # summary across outer folds
-            mu, sigma = np.mean(outer_scores), np.std(outer_scores)
+            mu = np.average(outer_scores, weights=fold_sizes)
+            sigma = np.sqrt(np.average((outer_scores - mu) ** 2,
+                                       weights=fold_sizes))
             print(f"→ Nested-CV F1 for {model_name}: {mu:.3f} ± {sigma:.3f}")
 
             best_results[model_name] = {
@@ -1752,7 +1763,7 @@ class EEGAnalyzer:
     # ------------------------------------------------------------
     #   ❷  Permutation test (label shuffle)
     # ------------------------------------------------------------
-    def permutation_test_best_model(self, n_perm=1000, random_state=42):
+    def permutation_test_best_model(self, n_perm=100, random_state=42):
         """
         Runs a label-shuffle test on the *best optimised pipeline*
         using the same cross-validation splitter (LOSO or k-fold).
@@ -2076,7 +2087,7 @@ if __name__ == "__main__":
 
     start_time=time.time()
     parser = argparse.ArgumentParser(description='EEG Data Analysis Tool')
-    parser.add_argument('--features_file', type=str, default="data/normalized_merges/14_all_channels/po4_norm-ComBat.csv",
+    parser.add_argument('--features_file', type=str, default="data/normalized_merges/14_all_channels/tp7_norm-ComBat.csv",
                         help='Path to the CSV file containing EEG features')
     parser.add_argument('--top_n_labels', type=int, default=2,
                         help='Number of labels to analyze (default: 2)')
