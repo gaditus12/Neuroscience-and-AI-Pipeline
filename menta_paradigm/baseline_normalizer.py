@@ -362,7 +362,7 @@ def main():
         description="Z-score / ComBat EEG normaliser"
     )
     ap.add_argument("--imagery",
-                    help="CSV file *or* directory of imagery CSVs", default='data/merged_features/14_sessions_merge_1743884222/channels', required=False)
+                    help="CSV file *or* directory of imagery CSVs", default='data/merged_features/14_sessions_merge_1743884222/three_class.csv', required=False)
     ap.add_argument("--baseline",
                     default="data/merged_features/14_sessions_merge_1743884222/merged_features_baseline_post.csv",
                     help="baseline CSV (merged over sessions)")

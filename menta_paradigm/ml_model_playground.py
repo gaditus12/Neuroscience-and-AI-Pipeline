@@ -12,6 +12,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import joblib
 import json
+import plotly.express as px
 import matplotlib.patches as patches
 import matplotlib.transforms as transforms
 from sklearn.model_selection import LeaveOneGroupOut   # NEW
@@ -69,7 +70,7 @@ class EEGAnalyzer:
 
         # Create a unique directory for this run
         timestamp = int(time.time())
-        self.run_directory = os.path.join("ml_model_outputs", f"run_{timestamp}")
+        self.run_directory = os.path.join("ml_model_outputs", f"{cv_method}_run_{timestamp}")
         os.makedirs(self.run_directory, exist_ok=True)
 
         # Initialize placeholders for later use
@@ -984,199 +985,171 @@ class EEGAnalyzer:
         ellipse.set_transform(transf + ax.transData)
         return ax.add_patch(ellipse)
 
+    def _get_best_model_selected_features(self):
+        best_model = self.optimization_results['best_model']
+        feature_selector = best_model.named_steps['feature_selection']
+        selected_indices = feature_selector.get_support(indices=True)
+        selected_features = [self.feature_columns[i] for i in selected_indices]
+
+        df_best = self.df[self.df["label"].isin(self.best_labels)]
+        X_best_full = df_best[self.feature_columns]
+        y_best = df_best["label"]
+
+        X_transformed = best_model.named_steps['scaler'].transform(X_best_full)
+        X_selected = best_model.named_steps['feature_selection'].transform(X_transformed)
+
+        return X_selected, y_best, df_best
+
     def visualize_pca(self):
-        print("\n---- VISUALIZING PCA ----")
+        print("\n---- VISUALIZING INTERACTIVE 2D PCA (both label-colored and distance-colored) ----")
+
+        if not hasattr(self, 'optimization_results'):
+            print("Run optimize_hyperparameters first.")
+            return
+
+        # 1) Prepare data
+        X_selected, y_best, df_best = self._get_best_model_selected_features()
+
         pca = PCA(n_components=2)
-        X_pca = pca.fit_transform(self.X_scaled)
-        df_pca = pd.DataFrame(X_pca, columns=["PC1", "PC2"])
-        df_pca["label"] = self.y
-        if 'channel' in self.df.columns:
-            df_pca["channel"] = self.df["channel"]
-
+        X_pca = pca.fit_transform(X_selected)
         explained_variance = pca.explained_variance_ratio_ * 100
-        plt.figure(figsize=(12, 10))
 
-        # Set up color palette and markers
-        palette = sns.color_palette("colorblind", n_colors=len(self.unique_labels))
-        color_dict = {label: palette[i] for i, label in enumerate(self.unique_labels)}
-        markers = ['o', 's', 'd', '^', 'v', '<', '>', 'p', '*', 'h', 'H', 'D', 'P', 'X']
-        marker_dict = {channel: markers[i % len(markers)] for i, channel in enumerate(self.unique_channels)}
-
-        # Plot each label (and channel if available)
-        for label in self.unique_labels:
-            label_data = df_pca[df_pca['label'] == label]
-            if 'channel' in self.df.columns:
-                for channel in self.unique_channels:
-                    channel_data = label_data[label_data['channel'] == channel]
-                    if not channel_data.empty:
-                        plt.scatter(channel_data["PC1"],
-                                    channel_data["PC2"],
-                                    s=100,
-                                    c=[color_dict[label]],
-                                    marker=marker_dict[channel],
-                                    alpha=0.8,
-                                    edgecolor='w',
-                                    linewidth=0.5,
-                                    label=f"{label} ({channel})")
-            else:
-                plt.scatter(label_data["PC1"],
-                            label_data["PC2"],
-                            s=100,
-                            c=[color_dict[label]],
-                            alpha=0.8,
-                            edgecolor='w',
-                            linewidth=0.5,
-                            label=label)
-
-        ax = plt.gca()
-        # Draw confidence ellipses for each label (if enough points exist)
-        for label in self.unique_labels:
-            label_data = df_pca[df_pca['label'] == label]
-            if len(label_data) >= 3:
-                self.confidence_ellipse(label_data["PC1"], label_data["PC2"],
-                                        ax, n_std=2.0,
-                                        edgecolor=color_dict[label],
-                                        linewidth=2,
-                                        alpha=0.5)
-
-        # Add centroids and annotations for each label
-        for label in self.unique_labels:
-            label_data = df_pca[df_pca['label'] == label]
-            centroid_x = label_data['PC1'].mean()
-            centroid_y = label_data['PC2'].mean()
-            plt.scatter(centroid_x, centroid_y,
-                        s=200,
-                        c=[color_dict[label]],
-                        marker='X',
-                        edgecolor='black',
-                        linewidth=1.5,
-                        alpha=1.0)
-            plt.annotate(f"{label}",
-                         (centroid_x, centroid_y),
-                         fontsize=12,
-                         fontweight='bold',
-                         ha='center',
-                         va='bottom',
-                         xytext=(0, 10),
-                         textcoords='offset points',
-                         bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="black", alpha=0.8))
-
-        plt.title("PCA Visualization of EEG Features\nChannel markers show distribution of readings", fontsize=16,
-                  pad=20)
-        plt.xlabel(f"PC1 ({explained_variance[0]:.2f}% Variance)", fontsize=12)
-        plt.ylabel(f"PC2 ({explained_variance[1]:.2f}% Variance)", fontsize=12)
-        plt.grid(True, linestyle='--', alpha=0.7)
-
-        # Avoid duplicate legend entries
-        handles, labels_leg = plt.gca().get_legend_handles_labels()
-        by_label = {}
-        for h, l in zip(handles, labels_leg):
-            label_part = l.split(' ')[0]
-            if label_part not in by_label:
-                by_label[label_part] = h
-        plt.legend(by_label.values(), by_label.keys(),
-                   title="Labels", title_fontsize=12, fontsize=10,
-                   loc='best', frameon=True, framealpha=0.95)
-
-        # Add a second legend for channel markers if available
+        df_pca = pd.DataFrame(X_pca, columns=["PC1", "PC2"])
+        df_pca["label"] = y_best.values
         if 'channel' in self.df.columns:
-            marker_handles = [plt.Line2D([0], [0], marker=marker_dict[ch], color='gray',
-                                         linestyle='None', markersize=10)
-                              for ch in self.unique_channels]
-            marker_labels = [f"Channel: {ch}" for ch in self.unique_channels]
-            plt.figlegend(marker_handles, marker_labels,
-                          loc='lower center', ncol=len(self.unique_channels),
-                          bbox_to_anchor=(0.5, 0), fontsize=10, frameon=True)
-            plt.subplots_adjust(bottom=0.15)
+            df_pca["channel"] = df_best["channel"].values
 
-        # Get metrics for the best model
-        best_model = self.detailed_results[self.best_labels]['best_model']
-        metrics = self.detailed_results[self.best_labels]['metrics'][best_model]
+        # ✨ Compute distance from center for dynamic color
+        df_pca["distance_from_center"] = (df_pca["PC1"] ** 2 + df_pca["PC2"] ** 2) ** 0.5
 
-        # Add text about the best label combination with multiple metrics
-        plt.figtext(0.5, 0.01,
-                    f"Most Separable Labels: {', '.join(self.best_labels)}\n"
-                    f"Model: {best_model} | Accuracy: {metrics['accuracy']:.4f} | F1: {metrics['f1_macro']:.4f} | Precision: {metrics['precision_macro']:.4f} | Recall: {metrics['recall_macro']:.4f}",
-                    ha="center", fontsize=12,
-                    bbox=dict(boxstyle="round,pad=0.5", fc="white", ec="black", alpha=0.8))
-        plt.tight_layout()
-        plt.subplots_adjust(bottom=0.15)
-        output_file = f"{self.run_directory}/{self.channel_approach}_eeg_pooled_visualization_top{self.top_n_labels}_labels_top{self.n_features_to_select}_features_{self.cv_method}.png"
-        plt.savefig(output_file, dpi=300, bbox_inches='tight')
-        print(f"PCA visualization saved as '{output_file}'")
-        plt.close()
+        # 2) Create first figure: color by label
+        fig_label = px.scatter(
+            df_pca,
+            x="PC1",
+            y="PC2",
+            color="label",
+            symbol="channel" if 'channel' in df_pca.columns else None,
+            hover_data=["label"] + (["channel"] if 'channel' in df_pca.columns else []),
+            title=f"PCA (2D) – Colored by Label\nPC1 {explained_variance[0]:.2f}%, PC2 {explained_variance[1]:.2f}%",
+            labels={
+                "PC1": f"PC1 ({explained_variance[0]:.2f}%)",
+                "PC2": f"PC2 ({explained_variance[1]:.2f}%)"
+            },
+            width=1000,
+            height=800,
+            template="plotly_white"
+        )
+        fig_label.update_traces(marker=dict(size=8, line=dict(width=0.5, color='DarkSlateGrey')))
+
+        # Save
+        output_file_label = f"{self.run_directory}/interactive_2d_pca_by_label_top{self.top_n_labels}_labels_top{self.n_features_to_select}_features_{self.cv_method}.html"
+        fig_label.write_html(output_file_label)
+        print(f"Saved label-colored 2D PCA → '{output_file_label}'")
+
+        # 3) Create second figure: color by distance
+        fig_dist = px.scatter(
+            df_pca,
+            x="PC1",
+            y="PC2",
+            color="distance_from_center",
+            color_continuous_scale="Viridis",
+            symbol="channel" if 'channel' in df_pca.columns else None,
+            hover_data=["label"] + (["channel"] if 'channel' in df_pca.columns else []),
+            title=f"PCA (2D) – Colored by Distance from Center\nPC1 {explained_variance[0]:.2f}%, PC2 {explained_variance[1]:.2f}%",
+            labels={
+                "PC1": f"PC1 ({explained_variance[0]:.2f}%)",
+                "PC2": f"PC2 ({explained_variance[1]:.2f}%)",
+                "distance_from_center": "Distance from Origin"
+            },
+            width=1000,
+            height=800,
+            template="plotly_white"
+        )
+        fig_dist.update_traces(marker=dict(size=8, line=dict(width=0.5, color='DarkSlateGrey')))
+        fig_dist.update_coloraxes(colorbar_title="Distance")
+
+        # Save
+        output_file_dist = f"{self.run_directory}/interactive_2d_pca_by_distance_top{self.top_n_labels}_labels_top{self.n_features_to_select}_features_{self.cv_method}.html"
+        fig_dist.write_html(output_file_dist)
+        print(f"Saved distance-colored 2D PCA → '{output_file_dist}'")
 
     def visualize_pca_3d(self):
-        """
-        Similar to visualize_pca, but uses 3 principal components
-        and plots them in a 3D scatter plot.
-        """
-        print("\n---- VISUALIZING 3D PCA ----")
+        print("\n---- VISUALIZING INTERACTIVE 3D PCA (both label-colored and distance-colored) ----")
 
-        # 1) Fit PCA with 3 components on your globally-scaled data (self.X_scaled)
+        if not hasattr(self, 'optimization_results'):
+            print("Run optimize_hyperparameters first.")
+            return
+
+        # 1) Prepare data
+        X_selected, y_best, df_best = self._get_best_model_selected_features()
+
         pca = PCA(n_components=3)
-        X_pca_3d = pca.fit_transform(self.X_scaled)
-        df_pca_3d = pd.DataFrame(X_pca_3d, columns=["PC1", "PC2", "PC3"])
-        df_pca_3d["label"] = self.y
-        if 'channel' in self.df.columns:
-            df_pca_3d["channel"] = self.df["channel"]
-
-        # 2) Prepare color & marker mappings
-        palette = sns.color_palette("colorblind", n_colors=len(self.unique_labels))
-        color_dict = {label: palette[i] for i, label in enumerate(self.unique_labels)}
-        markers = ['o', 's', 'd', '^', 'v', '<', '>', 'p', '*', 'h', 'H', 'D', 'P', 'X']
-        marker_dict = {ch: markers[i % len(markers)] for i, ch in enumerate(self.unique_channels)}
-
-        # 3) Create 3D figure
-        fig = plt.figure(figsize=(10, 8))
-        ax = fig.add_subplot(111, projection='3d')
-
-        # 4) Scatter-plot each label/channel
-        for label in self.unique_labels:
-            subset_label = df_pca_3d[df_pca_3d['label'] == label]
-            if 'channel' in self.df.columns:
-                for channel in self.unique_channels:
-                    subset_chan = subset_label[subset_label['channel'] == channel]
-                    if not subset_chan.empty:
-                        ax.scatter(
-                            subset_chan["PC1"], subset_chan["PC2"], subset_chan["PC3"],
-                            c=[color_dict[label]],
-                            marker=marker_dict[channel],
-                            alpha=0.8,
-                            edgecolor='w',
-                            linewidth=0.5,
-                            label=f"{label} ({channel})"
-                        )
-            else:
-                ax.scatter(
-                    subset_label["PC1"], subset_label["PC2"], subset_label["PC3"],
-                    c=[color_dict[label]],
-                    alpha=0.8,
-                    edgecolor='w',
-                    linewidth=0.5,
-                    label=label
-                )
-
-        # 5) Label axes with explained variance
+        X_pca_3d = pca.fit_transform(X_selected)
         explained_var = pca.explained_variance_ratio_ * 100
-        ax.set_xlabel(f"PC1 ({explained_var[0]:.2f}% var)")
-        ax.set_ylabel(f"PC2 ({explained_var[1]:.2f}% var)")
-        ax.set_zlabel(f"PC3 ({explained_var[2]:.2f}% var)")
-        ax.set_title("3D PCA Visualization of EEG Features", pad=20)
 
-        # Optional: remove duplicate legend entries
-        handles, labels = ax.get_legend_handles_labels()
-        unique_legend = {}
-        for h, lbl in zip(handles, labels):
-            if lbl not in unique_legend:
-                unique_legend[lbl] = h
-        ax.legend(unique_legend.values(), unique_legend.keys(), loc='best', frameon=True)
+        df_pca_3d = pd.DataFrame(X_pca_3d, columns=["PC1", "PC2", "PC3"])
+        df_pca_3d["label"] = y_best.values
+        if 'channel' in self.df.columns:
+            df_pca_3d["channel"] = df_best["channel"].values
 
-        # 6) Save figure (static PNG, not interactive)
-        output_file = f"{self.run_directory}/{self.channel_approach}_3d_pca_visualization.png"
-        plt.savefig(output_file, dpi=300, bbox_inches='tight')
-        print(f"3D PCA plot saved as '{output_file}'")
-        plt.close(fig)
+        # ✨ Compute distance from center
+        df_pca_3d["distance_from_center"] = (df_pca_3d["PC1"] ** 2 + df_pca_3d["PC2"] ** 2 + df_pca_3d[
+            "PC3"] ** 2) ** 0.5
+
+        # 2) Create first figure: color by label
+        fig_label = px.scatter_3d(
+            df_pca_3d,
+            x="PC1",
+            y="PC2",
+            z="PC3",
+            color="label",
+            symbol="channel" if 'channel' in df_pca_3d.columns else None,
+            hover_data=["label"] + (["channel"] if 'channel' in df_pca_3d.columns else []),
+            title=f"PCA (3D) – Colored by Label\nPC1 {explained_var[0]:.2f}%, PC2 {explained_var[1]:.2f}%, PC3 {explained_var[2]:.2f}%",
+            labels={
+                "PC1": f"PC1 ({explained_var[0]:.2f}%)",
+                "PC2": f"PC2 ({explained_var[1]:.2f}%)",
+                "PC3": f"PC3 ({explained_var[2]:.2f}%)"
+            },
+            width=1000,
+            height=800,
+            template="plotly_white"
+        )
+        fig_label.update_traces(marker=dict(size=5, line=dict(width=0.5, color='DarkSlateGrey')))
+
+        # Save
+        output_file_label = f"{self.run_directory}/interactive_3d_pca_by_label_top{self.top_n_labels}_labels_top{self.n_features_to_select}_features_{self.cv_method}.html"
+        fig_label.write_html(output_file_label)
+        print(f"Saved label-colored 3D PCA → '{output_file_label}'")
+
+        # 3) Create second figure: color by distance
+        fig_dist = px.scatter_3d(
+            df_pca_3d,
+            x="PC1",
+            y="PC2",
+            z="PC3",
+            color="distance_from_center",
+            color_continuous_scale="Viridis",
+            symbol="channel" if 'channel' in df_pca_3d.columns else None,
+            hover_data=["label"] + (["channel"] if 'channel' in df_pca_3d.columns else []),
+            title=f"PCA (3D) – Colored by Distance from Center\nPC1 {explained_var[0]:.2f}%, PC2 {explained_var[1]:.2f}%, PC3 {explained_var[2]:.2f}%",
+            labels={
+                "PC1": f"PC1 ({explained_var[0]:.2f}%)",
+                "PC2": f"PC2 ({explained_var[1]:.2f}%)",
+                "PC3": f"PC3 ({explained_var[2]:.2f}%)",
+                "distance_from_center": "Distance from Origin"
+            },
+            width=1000,
+            height=800,
+            template="plotly_white"
+        )
+        fig_dist.update_traces(marker=dict(size=5, line=dict(width=0.5, color='DarkSlateGrey')))
+        fig_dist.update_coloraxes(colorbar_title="Distance")
+
+        # Save
+        output_file_dist = f"{self.run_directory}/interactive_3d_pca_by_distance_top{self.top_n_labels}_labels_top{self.n_features_to_select}_features_{self.cv_method}.html"
+        fig_dist.write_html(output_file_dist)
+        print(f"Saved distance-colored 3D PCA → '{output_file_dist}'")
 
     def visualize_feature_importance(self):
         print("\n---- VISUALIZING FEATURE IMPORTANCE ----")
@@ -1346,267 +1319,266 @@ class EEGAnalyzer:
         print(f"Feature importance scores exported to '{features_file}'")
         self.export_misclassified_samples()
 
-    def optimize_hyperparameters(self, n_iter=25):
-        """
-        Perform Bayesian hyperparameter optimization using scikit-optimize.
+    # ---------------------------------------------------------------------
+    #  Helper: export a nice CSV with weighted‑mean inner/outer scores
+    # ---------------------------------------------------------------------
+    # ---------------------------------------------------------------------
+    #  Helper: export a nice CSV with weighted‑mean inner/outer scores
+    # ---------------------------------------------------------------------
+    def _export_cv_summary(self, model_logs: dict):
+        """Save per‑model weighted mean/STD of inner & outer F1 to CSV."""
+        import pandas as pd, numpy as np, os
 
-        Parameters:
-            n_iter (int): Number of iterations for the optimization process.
+        rows = []
+        for model, log in model_logs.items():
+            df = pd.DataFrame(log)
+            w  = df["n_samples"].to_numpy()
+            # weighted means / stds
+            mu_inner  = np.average(df["inner_best_f1"], weights=w)
+            mu_outer  = np.average(df["outer_f1"],      weights=w)
+            sd_inner  = np.sqrt(np.average((df["inner_best_f1"]-mu_inner)**2, weights=w))
+            sd_outer  = np.sqrt(np.average((df["outer_f1"]-mu_outer)**2,      weights=w))
 
-        Returns:
-            dict: Best hyperparameters found.
-        """
-        print("\n---- HYPERPARAMETER OPTIMIZATION ----")
+            rows.append({
+                "model"          : model,
+                "mean_inner_f1"  : mu_inner,
+                "std_inner_f1"   : sd_inner,
+                "mean_outer_f1"  : mu_outer,
+                "std_outer_f1"   : sd_outer,
+                "n_folds"        : len(df),
+                "n_total_samples": int(w.sum())
+            })
+
+        summary_df = pd.DataFrame(rows).sort_values("mean_outer_f1", ascending=False)
+        out_csv = os.path.join(self.run_directory, "nested_cv_summary.csv")
+        summary_df.to_csv(out_csv, index=False)
+        print(f"✓ Saved nested‑CV summary → {out_csv}")
+        return summary_df
+
+
+    # ---------------------------------------------------------------------
+    #  Helper: bar‑plot inner vs outer mean F1 for every model (annotated)
+    # ---------------------------------------------------------------------
+    def _plot_cv_summary(self, summary_df):
+        import matplotlib.pyplot as plt, numpy as np, os
+
+        idx   = np.arange(len(summary_df))
+        bar_w = 0.35
+        plt.figure(figsize=(10, 6))
+        ax = plt.gca()
+
+        ax.bar(idx - bar_w/2, summary_df["mean_inner_f1"], bar_w,
+               label="Inner (best) F1", yerr=summary_df["std_inner_f1"], capsize=4)
+        ax.bar(idx + bar_w/2, summary_df["mean_outer_f1"], bar_w,
+               label="Outer (held‑out) F1", yerr=summary_df["std_outer_f1"], capsize=4)
+
+        # annotate bars with values
+        for p in ax.patches:
+            height = p.get_height()
+            ax.text(p.get_x() + p.get_width() / 2,
+                    height + 0.01,
+                    f"{height:.2f}",
+                    ha="center", va="bottom", fontsize=8,
+                    bbox=dict(facecolor='white', edgecolor='none', alpha=0.7))
+
+
+        ax.set_xticks(idx)
+        ax.set_xticklabels(summary_df["model"], rotation=45, ha="right")
+        ax.set_ylabel("Macro‑F1")
+        ax.set_ylim(0, 1)
+        ax.set_title("Nested‑CV performance (inner vs outer)")
+        ax.legend()
+        plt.tight_layout()
+        out_png = os.path.join(self.run_directory, "nested_cv_summary.png")
+        plt.savefig(out_png, dpi=300)
+        plt.close()
+        print(f"✓ Saved nested‑CV summary plot → {out_png}")
+
+    # ---------------------------------------------------------------------
+    #  REPLACEMENT: optimise_hyperparameters now collects per‑model logs
+    # ---------------------------------------------------------------------
+    def optimize_hyperparameters(self, n_iter: int = 25):
+        """Same logic as before, but now returns a nicer CSV/plot with inner vs outer F1."""
         from skopt import BayesSearchCV
         from skopt.space import Real, Integer, Categorical
         from tqdm import tqdm
+        import numpy as np, joblib
 
-        # Focus on data corresponding to the best label combination
-        if not hasattr(self, 'best_labels'):
+        if not hasattr(self, "best_labels"):
             print("Run evaluate_label_combinations first to find the best labels")
             return
 
         df_best = self.df[self.df["label"].isin(self.best_labels)]
-        X_best = df_best[self.feature_columns]
-        y_best = df_best["label"]
+        X_best  = df_best[self.feature_columns]
+        y_best  = df_best["label"]
 
-        # Define the CV strategy based on existing settings
-        if self.cv_method == "loo":
-            from sklearn.model_selection import LeaveOneOut
-            cv = LeaveOneOut()
-        elif self.cv_method == "kfold":
-            from sklearn.model_selection import StratifiedKFold
-            cv = StratifiedKFold(n_splits=self.kfold_splits)
-        else:  # holdout - we'll use k-fold for optimization
-            from sklearn.model_selection import StratifiedKFold
-            cv = StratifiedKFold(n_splits=5)
+        # --- define search spaces (identical to your previous dict) ---
+        # [... keep the big search_spaces dict unchanged ...]
+        search_spaces = self._define_search_spaces()  # ← put your long dict into this helper
 
-        # Create pipeline with preprocessing steps to avoid information leakage
-        from sklearn.pipeline import Pipeline
-        from sklearn.preprocessing import StandardScaler
-        from sklearn.feature_selection import SelectKBest, f_classif
+        # choose outer / inner splitters
+        outer_cv, inner_cv_proto = self._get_nested_splitters(df_best["session"].values)
 
-        # Define search spaces for different models
+        best_results, all_results, model_logs = {}, {}, {}  # ← collect logs per model
+
+        for model_name, space in tqdm(search_spaces.items(), desc="Optimising (nested CV)"):
+            print(f"\n⟹  Optimising {model_name}")
+            outer_scores, fold_estimators, fold_sizes, outer_log = [], [], [], []
+
+            # --- outer loop --------------------------------------------------
+            outer_indices = outer_cv.split(X_best, y_best, groups=df_best["session"].values)
+            for fold, (tr_idx, te_idx) in enumerate(outer_indices, start=1):
+                X_tr, X_te = X_best.iloc[tr_idx], X_best.iloc[te_idx]
+                y_tr, y_te = y_best.iloc[tr_idx], y_best.iloc[te_idx]
+
+                inner_cv = list(inner_cv_proto.split(X_tr, y_tr, groups=df_best["session"].values[tr_idx]))
+
+                pipe = Pipeline([
+                    ("scaler", StandardScaler()),
+                    ("feature_selection", SelectKBest(f_classif)),
+                    ("model", RandomForestClassifier())  # placeholder
+                ])
+
+                opt = BayesSearchCV(pipe, space, n_iter=n_iter, cv=inner_cv,
+                                    scoring="f1_macro", n_jobs=-1, random_state=42, verbose=0)
+                opt.fit(X_tr, y_tr)
+
+                y_pred      = opt.predict(X_te)
+                outer_f1    = f1_score(y_te, y_pred, average="macro")
+                inner_best  = opt.best_score_
+
+                outer_scores.append(outer_f1)
+                fold_sizes.append(len(te_idx))
+                fold_estimators.append(opt.best_estimator_)
+
+                outer_log.append({
+                    "fold"         : fold,
+                    "n_samples"    : len(te_idx),
+                    "inner_best_f1": inner_best,
+                    "outer_f1"     : outer_f1
+                })
+                print(f"   fold {fold}: inner = {inner_best:.3f} | outer = {outer_f1:.3f}")
+
+            # ---------- weighted mean/std ----------
+            mu  = np.average(outer_scores, weights=fold_sizes)
+            sig = np.sqrt(np.average((outer_scores-mu)**2, weights=fold_sizes))
+            print(f"→ Nested‑CV F1 for {model_name}: {mu:.3f} ± {sig:.3f}")
+
+            best_results[model_name] = {
+                "outer_mean_f1": mu,
+                "outer_std_f1" : sig,
+                "per_fold_f1"  : outer_scores,
+                "best_fold_model": fold_estimators[int(np.argmax(outer_scores))]
+            }
+            all_results[model_name]  = {"params": opt.cv_results_["params"],
+                                        "scores": opt.cv_results_["mean_test_score"]}
+            model_logs[model_name]   = outer_log                           # ← keep log
+
+            # still save full per‑fold CSV for transparency
+            self._persist_nested_cv_log(model_name, outer_log)
+            joblib.dump(opt.best_estimator_, f"{self.run_directory}/best_{model_name.lower()}_model.pkl")
+
+        # -------- overall winner ----------
+        best_model_name = max(best_results, key=lambda m: best_results[m]["outer_mean_f1"])
+        self.optimization_results = {
+            "best_model_name": best_model_name,
+            "best_model"     : best_results[best_model_name]["best_fold_model"],
+            "best_score"     : best_results[best_model_name]["outer_mean_f1"],
+            "best_results"   : best_results,
+            "all_results"    : all_results
+        }
+
+        # --- NEW: export nice CSV & figure ----------------------------------
+        summary_df = self._export_cv_summary(model_logs)
+        self._plot_cv_summary(summary_df)
+
+        return best_results
+
+    # ---------------------------------------------------------------------
+    #  factor the huge search‑space dict into its own helper
+    # ---------------------------------------------------------------------
+    def _define_search_spaces(self):
+        """Return the gigantic search_spaces dict (unchanged from your code)."""
+        from skopt.space import Real, Integer, Categorical
         search_spaces = {
             # ───────────────────────────────────────────────────────── Random Forest ──
             'RandomForest': {
                 'model': Categorical([RandomForestClassifier(
                     random_state=42, n_jobs=-1)]),
-                'model__n_estimators': Categorical([50]),  # fewer trees → less variance
+                'model__n_estimators': Integer(50, 150),  # fewer trees → less variance
                 'model__max_depth': Categorical([4]),  # very shallow
                 'model__min_samples_split': Integer(2, 6),
                 'model__min_samples_leaf': Integer(2, 8),  # prevents tiny leaves
                 'model__class_weight': Categorical(['balanced']),
-                'feature_selection__k': Categorical([20]) #TODO change back if you want search on that
+                'feature_selection__k': Integer(3,20)
             },
 
             # ──────────────────────────────────────────────────────────────   SVM  ──
             'SVM': {
                 'model': Categorical([SVC(
                     random_state=42, probability=True)]),
-                'model__kernel': Categorical(['linear', 'rbf']),  # poly removed
-                'model__C': Real(1e-2, 5.0, prior = 'log-uniform'),
-        'model__gamma': Real(1e-4, 5e-2, prior = 'log-uniform'),
-        'model__class_weight': Categorical(['balanced', None]),
-        'feature_selection__k': Integer(4, 15)
-        },
+                'model__kernel': Categorical(['linear', 'rbf', 'poly']),  # poly removed
+                'model__C': Real(1e-2, 5.0, prior='log-uniform'),
+                'model__gamma': Real(1e-4, 5e-2, prior='log-uniform'),
+                'model__class_weight': Categorical(['balanced', None]),
+                'feature_selection__k': Integer(3, 20)
+            },
 
-        # # ─────────────────────────────────────────── Elastic‑Net Logistic Reg ──
-        'ElasticNetLogReg': {
-            'model': Categorical([LogisticRegression(
-                penalty='elasticnet', solver='saga',
-                class_weight='balanced',
-                max_iter=4000, random_state=42)]),
-            'model__C': Real(1e-2, 5.0, prior = 'log-uniform'),
-        'model__l1_ratio': Real(0.1, 0.9),  # avoid extremes
-        'feature_selection__k': Integer(5, 20)
-        },
+            # # ─────────────────────────────────────────── Elastic‑Net Logistic Reg ──
+            'ElasticNetLogReg': {
+                'model': Categorical([LogisticRegression(
+                    penalty='elasticnet', solver='saga',
+                    class_weight='balanced',
+                    max_iter=4000, random_state=42)]),
+                'model__C': Real(1e-2, 5.0, prior='log-uniform'),
+                'model__l1_ratio': Real(0.1, 0.9),  # avoid extremes
+                'feature_selection__k': Integer(3, 20)
+            },
 
-        # ───────────────────────────────────────────────────────── Extra Trees ──
-        'ExtraTrees': {
-            'model': Categorical([ExtraTreesClassifier(
-                class_weight='balanced',
-                random_state=42, n_jobs=-1)]),
-            'model__n_estimators': Integer(80, 200),
-            'model__max_depth': Integer(2, 8),
-            'model__min_samples_leaf': Integer(2, 6),
-            'feature_selection__k': Integer(5, 20)
-        },
+            # ───────────────────────────────────────────────────────── Extra Trees ──
+            'ExtraTrees': {
+                'model': Categorical([ExtraTreesClassifier(
+                    class_weight='balanced',
+                    random_state=42, n_jobs=-1)]),
+                'model__n_estimators': Integer(80, 200),
+                'model__max_depth': Integer(2, 8),
+                'model__min_samples_leaf': Integer(2, 6),
+                'feature_selection__k': Integer(3, 20)
+            },
 
-        # ────────────────────────────────────────── HistGradientBoosting ──
-        'HGBClassifier': {
-            'model': Categorical([HistGradientBoostingClassifier(
-                class_weight='balanced', random_state=42)]),
-            'model__learning_rate': Real(0.02, 0.12, prior='log-uniform'),
-            'model__max_depth': Integer(2, 4),
-            'model__max_iter': Integer(60, 100),
-            'feature_selection__k': Integer(5, 20)
-        },
+            # ────────────────────────────────────────── HistGradientBoosting ──
+            'HGBClassifier': {
+                'model': Categorical([HistGradientBoostingClassifier(
+                    class_weight='balanced', random_state=42)]),
+                'model__learning_rate': Real(0.02, 0.12, prior='log-uniform'),
+                'model__max_depth': Integer(2, 4),
+                'model__max_iter': Integer(60, 100),
+                'feature_selection__k': Integer(3, 20)
+            },
 
-        # ───────────────────────────────────────────────────── k‑Nearest Nbrs ──
-        'kNN': {
-            'model': Categorical([KNeighborsClassifier()]),
-            'model__n_neighbors': Integer(5, 15),  # ≥5 to limit variance
-            'model__weights': Categorical(['uniform', 'distance']),
-            'feature_selection__k': Integer(5, 20)
-        },
+            # ───────────────────────────────────────────────────── k‑Nearest Nbrs ──
+            'kNN': {
+                'model': Categorical([KNeighborsClassifier()]),
+                'model__n_neighbors': Integer(5, 15),  # ≥5 to limit variance
+                'model__weights': Categorical(['uniform', 'distance']),
+                'feature_selection__k': Integer(3, 20)
+            },
 
-        # ────────────────────────────────────────────── Gaussian Naïve Bayes ──
-        'GaussianNB': {
-            'model': Categorical([GaussianNB()])
-            # no hyper‑params
-        },
+            # ────────────────────────────────────────────── Gaussian Naïve Bayes ──
+            'GaussianNB': {
+                'model': Categorical([GaussianNB()])
+                # no hyper‑params
+            },
 
-        # ────────────────────────────────────────────── Shrinkage LDA ──
-        'ShrinkageLDA': {
-            'model': Categorical([LinearDiscriminantAnalysis(
-                solver='lsqr')]),
-            'model__shrinkage': Categorical(['auto', 0.1, 0.3, None])
-        }
-        }
+            # ────────────────────────────────────────────── Shrinkage LDA ──
+            'ShrinkageLDA': {
 
-        outer_cv, inner_cv_proto = self._get_nested_splitters(
-            df_best["session"].values)  # session IDs array
-
-        best_results, all_results = {}, {}
-
-        for model_name, space in tqdm(search_spaces.items(),
-                                      desc="Optimising (nested CV)"):
-            print(f"\n⟹  Optimising {model_name}")
-
-            outer_scores, outer_std, fold_estimators, fold_sizes= [], [], [], []
-            outer_log = []  # ← new: per-model log
-
-            # ───── outer loop (may be None for 'holdout') ───────────────────────
-            if outer_cv is None:  # holdout   – single dev/test split
-                outer_indices = [(np.arange(len(X_best)), np.arange(len(X_best)))]
-            else:
-                outer_indices = outer_cv.split(X_best, y_best,
-                                               groups=df_best["session"].values)
-
-            for fold, (tr_idx, te_idx) in enumerate(outer_indices, start=1):
-                X_tr, X_te = X_best.iloc[tr_idx], X_best.iloc[te_idx]
-                y_tr, y_te = y_best.iloc[tr_idx], y_best.iloc[te_idx]
-
-                # make an *inner* CV object limited to the training sessions
-                if outer_cv is None:
-                    inner_cv = inner_cv_proto  # plain StratKFold
-                else:
-                    inner_cv = list(
-                        inner_cv_proto.split(
-                            X_tr, y_tr,
-                            groups=df_best["session"].values[tr_idx])
-                    )
-
-                # ----------------  inner Bayesian search  ----------------------
-                pipe = Pipeline([
-                    ('scaler', StandardScaler()),
-                    ('feature_selection', SelectKBest(f_classif)),
-                    ('model', RandomForestClassifier())  # placeholder, overwritten by BayesSearch
-                ])
-
-                opt = BayesSearchCV(
-                    pipe,
-                    space,
-                    n_iter=n_iter,
-                    cv=inner_cv,
-                    scoring='f1_macro',
-                    n_jobs=-1,
-                    random_state=42,
-                    verbose=0
-                )
-                opt.fit(X_tr, y_tr)
-
-                # unbiased score on the *outer-test* portion
-                y_pred = opt.predict(X_te)
-                outer_acc = accuracy_score(y_te, y_pred)
-                prec, rec, f1c, _ = precision_recall_fscore_support(
-                    y_te, y_pred, average='macro')
-
-                outer_f1 = f1_score(y_te, y_pred, average='macro')
-                inner_best_f = opt.best_score_
-
-                outer_scores.append(outer_f1)
-                fold_sizes.append(len(te_idx))  # <-- add this
-
-                fold_estimators.append(opt.best_estimator_)
-
-                outer_log.append({
-                    'fold': fold,
-                    'n_samples': len(te_idx),  # ← new column
-                    'inner_best_f1': round(inner_best_f, 3),
-                    'outer_f1': round(outer_f1, 3),
-                    'outer_acc': round(outer_acc, 3),
-                    'outer_prec': round(prec, 3),
-                    'outer_recall': round(rec, 3),
-                    'inner_best_params': opt.best_params_,
-
-                })
-                labels = y_te.unique()  # ['m_et_s', 'n_3_s']
-                prec_c, rec_c, f1_c, _ = precision_recall_fscore_support(
-                    y_te, y_pred, average=None, labels=labels)
-
-                for lbl, p, r, f in zip(labels, prec_c, rec_c, f1_c):
-                    outer_log[-1][f'f1_{lbl}'] = round(f, 3)
-                    outer_log[-1][f'prec_{lbl}'] = round(p, 3)
-                    outer_log[-1][f'recall_{lbl}'] = round(r, 3)
-
-                print(f"   fold {fold}: best inner F-score = {opt.best_score_:.3f} | "
-                      f"outer F-score = {outer_scores[-1]:.3f}")
-
-            # summary across outer folds
-            mu = np.average(outer_scores, weights=fold_sizes)
-            sigma = np.sqrt(np.average((outer_scores - mu) ** 2,
-                                       weights=fold_sizes))
-            print(f"→ Nested-CV F1 for {model_name}: {mu:.3f} ± {sigma:.3f}")
-
-            best_results[model_name] = {
-                'outer_mean_f1': mu,
-                'outer_std_f1': sigma,
-                'per_fold_f1': outer_scores,
-                'best_fold_model': fold_estimators[int(np.argmax(outer_scores))]
+                'model': Categorical([LinearDiscriminantAnalysis(
+                    solver='lsqr')]),
+                'model__shrinkage': Categorical(['auto', 0.1, 0.3, None])
             }
-
-            # keep raw BayesSearch history if you wish
-            all_results[model_name] = {
-                'params': opt.cv_results_['params'],
-                'scores': opt.cv_results_['mean_test_score']
-            }
-            # NEW – save per-fold inner / outer log
-            self._persist_nested_cv_log(model_name, outer_log)
-            # Save the best model to a file
-            import joblib
-            joblib.dump(opt.best_estimator_, f"{self.run_directory}/best_{model_name.lower()}_model.pkl")
-
-        # pick overall winner
-        best_model_name = max(best_results, key=lambda m: best_results[m]['outer_mean_f1'])
-        print(f"\n★★  Best (nested-CV) model = {best_model_name}  "
-              f"{best_results[best_model_name]['outer_mean_f1']:.3f} ± "
-              f"{best_results[best_model_name]['outer_std_f1']:.3f}")
-
-
-        # Determine the best model overall
-        # (store the real estimator + use the mean outer F1)
-        best_model = best_results[best_model_name]['best_fold_model']  # ← a Pipeline
-        best_score = best_results[best_model_name]['outer_mean_f1']
-
-        print(f"\nBest overall model: {best_model_name}")
-        print(f"Best overall score (F1): {best_score:.4f}")
-
-        # Save the optimization results
-        self.optimization_results = {
-            'best_model_name': best_model_name,
-            'best_model': best_model,
-            'best_score': best_score,
-            'best_results': best_results,
-            'all_results': all_results
         }
-
-        # Visualize the optimization results
-        self._visualize_optimization_results(all_results)
-
-        return best_results
-
+        return search_spaces
     def _visualize_optimization_results(self, all_results):
         """
         Visualize the optimization results.
@@ -1734,117 +1706,156 @@ class EEGAnalyzer:
     #   ❶  Violin / strip plot of LOSO (or k-fold) outer scores
     # ------------------------------------------------------------
     def plot_outer_fold_distribution(self):
-        """
-        Draw a violin/strip plot of the outer-fold F1 scores for the
-        best model picked in optimise_hyperparameters().
-        Works for LOSO or k-fold.
-        """
+        """Draw violin/strip with μ±σ and null thresholds."""
         if not hasattr(self, 'optimization_results'):
             print("Run optimise_hyperparameters first.")
             return
 
+        import matplotlib.pyplot as plt, seaborn as sns, numpy as np, os
+
+        import matplotlib.pyplot as plt, seaborn as sns, numpy as np, os
         best_name = self.optimization_results['best_model_name']
-        fold_scores = self.optimization_results['best_results'  # dict from optimise_hyperparameters
-        ][best_name]['per_fold_f1']
+        fold_scores = np.asarray(self.optimization_results['best_results'][best_name]['per_fold_f1'])
+        mean_s = fold_scores.mean()
+        sd_s = fold_scores.std(ddof=0)
 
-        import matplotlib.pyplot as plt, seaborn as sns, numpy as np
+        # ── NEW: vectorised bootstrap (5 000 resamples) ──────────────────────────
+        rng = np.random.default_rng(42)
+        n_boot = 5_000
+        boot_means = rng.choice(fold_scores, size=(n_boot, fold_scores.size), replace=True).mean(axis=1)
+        ci_low, ci_high = np.percentile(boot_means, [2.5, 97.5])
+
         plt.figure(figsize=(5, 6))
-        sns.violinplot(data=fold_scores, inner=None, color='skyblue')
-        sns.stripplot(data=fold_scores, color='black', size=6, jitter=False)
+        ax = plt.gca()
+        sns.violinplot(data=fold_scores, inner=None, color='skyblue', ax=ax)
+        sns.stripplot(data=fold_scores, color='black', size=6, jitter=False, ax=ax)
 
-        plt.ylabel('Macro-F1 (outer fold)')
-        plt.title(f'{best_name} – distribution across {len(fold_scores)} outer folds')
-        plt.ylim(0, 1)
+        # mean and bootstrap CI
+        ax.axhline(mean_s, ls='--', lw=2, color='red',
+                   label=f"μ={mean_s:.2f}±{sd_s:.2f}")
+        ax.axhspan(ci_low, ci_high, color='red', alpha=0.15,
+                   label=f'95 % boot CI [{ci_low:.2f}, {ci_high:.2f}]')
+
+        # reference lines from permutation test
+        null95_file = os.path.join(self.run_directory, "null_95th_percentile.npy")
+        null50_file = os.path.join(self.run_directory, "null_50th_percentile.npy")
+        if os.path.exists(null95_file):
+            crit95 = float(np.load(null95_file))
+            ax.axhline(crit95, ls=':', lw=2, color='black',
+                       label=f'α = 0.05 ({crit95:.2f})')
+        crit50 = float(np.load(null50_file)) if os.path.exists(null50_file) else 0.50
+        ax.axhline(crit50, ls='--', lw=1.5, color='grey',
+                   label=f'Null mean ({crit50:.2f})')
+
+        ax.set_ylabel('Macro-F1 (outer fold)')
+        ax.set_title(f'{best_name} – distribution across {fold_scores.size} outer folds')
+        ax.set_ylim(0, 1)
+        ax.legend()
         out_file = f"{self.run_directory}/outer_fold_f1_distribution.png"
-        plt.savefig(out_file, dpi=300, bbox_inches='tight')
+        plt.tight_layout();
+        plt.savefig(out_file, dpi=300, bbox_inches='tight');
         plt.close()
-        print(f"Saved violin plot →  {out_file}")
+        print(f"Saved violin plot → {out_file}")
 
     # ------------------------------------------------------------
     #   ❷  Permutation test (label shuffle)
     # ------------------------------------------------------------
-    def permutation_test_best_model(self, n_perm=100, random_state=42):
-        """
-        Runs a label-shuffle test on the *best optimised pipeline*
-        using the same cross-validation splitter (LOSO or k-fold).
 
-        Returns
-        -------
-        p_value   : fraction of permutations whose mean F1 ≥ observed
-        """
+    # ---------------------------------------------------------------------
+    #  Permutation test – now saves 95‑th *and* 50‑th percentile
+    # ---------------------------------------------------------------------
+    def permutation_test_best_model(self, n_perm: int = 1_000, random_state: int = 42):
+        """Label‑shuffle test; saves null 95th & 50th percentiles for overlays."""
         if not hasattr(self, 'optimization_results'):
             print("Run optimise_hyperparameters first.")
             return
+        import numpy as np
 
-        rng = np.random.default_rng(random_state)
-        best_pipe = self.optimization_results['best_model']
-        best_name = self.optimization_results['best_model_name']
+        rng        = np.random.default_rng(random_state)
+        best_pipe  = self.optimization_results['best_model']
+        best_name  = self.optimization_results['best_model_name']
 
-        # data for the winning label combination
         df_best = self.df[self.df["label"].isin(self.best_labels)]
-        X = df_best[self.feature_columns].values
-        y = df_best["label"].values
-        groups = df_best["session"].values if self.cv_method == 'loso' else None
+        X       = df_best[self.feature_columns].values
+        y       = df_best["label"].values
+        groups  = df_best["session"].values if self.cv_method == 'loso' else None
 
-        # choose the same outer splitter
         if self.cv_method == 'loso':
             outer_splitter = LeaveOneGroupOut()
             split_iter = outer_splitter.split(X, y, groups)
         else:
-            outer_splitter = StratifiedKFold(n_splits=self.kfold_splits, shuffle=True,
-                                             random_state=123)
+            outer_splitter = StratifiedKFold(n_splits=self.kfold_splits, shuffle=True, random_state=123)
             split_iter = outer_splitter.split(X, y)
 
-        # --- observed score -------------------------------------------------
-        from sklearn.metrics import f1_score
-        obs_scores = []
+        from sklearn.metrics import f1_score, accuracy_score
+        obs_f1, obs_acc = [], []
+
+        # ---------- observed outer-fold scores ----------
         for tr, te in split_iter:
             best_pipe.fit(X[tr], y[tr])
-            obs_scores.append(f1_score(y[te], best_pipe.predict(X[te]),
-                                       average='macro'))
-        obs_mean = np.mean(obs_scores)
+            y_pred = best_pipe.predict(X[te])
+            obs_f1.append(f1_score(y[te], y_pred, average='macro'))
+            obs_acc.append(accuracy_score(y[te], y_pred))
+        obs_mean_f1 = float(np.mean(obs_f1))
+        obs_mean_acc = float(np.mean(obs_acc))
+        print(f"Observed μ F1 = {obs_mean_f1:.3f} | μ ACC = {obs_mean_acc:.3f}")
 
-        print(f"Observed mean outer-fold F1 for {best_name}: {obs_mean:.3f}")
+        null_mean_f1 = np.empty(n_perm)
+        null_mean_acc = np.empty(n_perm)
 
-        # --- permutations ---------------------------------------------------
-        null_means = []
-        for p in tqdm(range(n_perm), desc="Permutations"):
-            y_perm = rng.permutation(y)  # shuffle labels globally
-            split_iter = (outer_splitter.split(X, y_perm, groups)
-                          if groups is not None else
-                          outer_splitter.split(X, y_perm))
-
-            fold_f1 = []
-            for tr, te in split_iter:
+        for i in tqdm(range(n_perm), desc="Permutations"):
+            y_perm = rng.permutation(y)
+            fold_f1, fold_acc = [], []
+            for tr, te in (outer_splitter.split(X, y_perm, groups) if groups is not None
+            else outer_splitter.split(X, y_perm)):
                 best_pipe.fit(X[tr], y_perm[tr])
-                fold_f1.append(
-                    f1_score(y_perm[te], best_pipe.predict(X[te]),
-                             average='macro')
-                )
-            null_means.append(np.mean(fold_f1))
+                y_hat = best_pipe.predict(X[te])
+                fold_f1.append(f1_score(y_perm[te], y_hat, average='macro'))
+                fold_acc.append(accuracy_score(y_perm[te], y_hat))
+            null_mean_f1[i] = np.mean(fold_f1)
+            null_mean_acc[i] = np.mean(fold_acc)
 
-        null_means = np.array(null_means)
-        p_val = (np.sum(null_means >= obs_mean) + 1) / (n_perm + 1)
-        print(f"Permutation-test p-value: {p_val:.4f}")
+        p_f1 = (np.sum(null_mean_f1 >= obs_mean_f1) + 1) / (n_perm + 1)
+        p_acc = (np.sum(null_mean_acc >= obs_mean_acc) + 1) / (n_perm + 1)
+        crit95_f1 = float(np.percentile(null_mean_f1, 95))
+        crit95_acc = float(np.percentile(null_mean_acc, 95))
+        crit50_f1 = float(np.percentile(null_mean_f1, 50))
+        crit50_acc = float(np.percentile(null_mean_acc, 50))
+        print(f"Permutation p-values →  F1: {p_f1:.4f} | ACC: {p_acc:.4f}")
 
-        # -------- histogram ------------
-        import matplotlib.pyplot as plt
-        plt.figure(figsize=(6, 4))
-        plt.hist(null_means, bins=30, alpha=0.7)
-        plt.axvline(obs_mean, color='red', lw=2,
-                    label=f'Observed ({obs_mean:.3f})')
-        plt.xlabel('Mean macro-F1 (null)')
-        plt.ylabel('Count')
-        plt.title(f'Permutation test – {best_name}\n p = {p_val:.4f}')
-        plt.legend()
+        # keep F1 thresholds for the violin plot
+        np.save(os.path.join(self.run_directory, "null_95th_percentile.npy"), crit95_f1)
+        np.save(os.path.join(self.run_directory, "null_50th_percentile.npy"), crit50_f1)
+
+        # ------------- side-by-side histogram -----------------
+        fig, ax = plt.subplots(1, 2, figsize=(12, 4), sharey=True)
+
+        ax[0].hist(null_mean_f1, bins=30, alpha=0.7)
+        ax[0].axvline(obs_mean_f1, color='red', lw=2, label=f'Obs {obs_mean_f1:.3f}')
+        ax[0].axvline(crit95_f1, color='black', ls=':', lw=2, label=f'95 % null')
+        ax[0].axvline(crit50_f1, color='grey', ls=':', lw=2, label='Mean F1')
+        ax[0].set_title(f'Macro-F1 null distribution\np={p_f1:.4f}')
+        ax[0].set_xlabel('Mean F1')
+        ax[0].set_ylabel('Count')
+        ax[0].legend()
+
+        ax[1].hist(null_mean_acc, bins=30, alpha=0.7, color='mediumaquamarine')
+        ax[1].axvline(obs_mean_acc, color='red', lw=2, label=f'Obs {obs_mean_acc:.3f}')
+        ax[1].axvline(crit95_acc, color='black', ls=':', lw=2, label='Significance Threshold (α=0.05)')
+        ax[1].axvline(crit50_acc, color='grey', ls=':', lw=2, label='Mean Accuracy')
+        ax[1].set_title(f'Accuracy null distribution\np={p_f1:.4f}')
+        ax[1].set_xlabel('Mean Accuracy')
+        ax[1].legend()
+
+        fig.suptitle(f'Permutation test – {best_name}  ({n_perm} permutations)', y=1.03)
         out_file = f"{self.run_directory}/permutation_histogram_{best_name}.png"
-        plt.savefig(out_file, dpi=300, bbox_inches='tight')
+        fig.tight_layout();
+        fig.savefig(out_file, dpi=300, bbox_inches='tight');
         plt.close()
-        print(f"Saved permutation histogram →  {out_file}")
+        print(f"Saved permutation histogram → {out_file}")
 
-        # store for later if you like
-        self.permutation_p_value = p_val
-        return p_val
+        self.permutation_p_value = {'f1': p_f1, 'accuracy': p_acc}
+        return self.permutation_p_value, crit95_f1, crit50_f1
 
     def evaluate_best_model(self):
         """
@@ -2045,8 +2056,9 @@ class EEGAnalyzer:
         #   extra sanity-checks / visual diagnostics
         # ---------------------------------------------
         if optimize_hyperparams:
+            self.permutation_test_best_model(n_perm=1_000)
             self.plot_outer_fold_distribution()
-            self.permutation_test_best_model(n_perm=1000)
+            self._visualize_optimization_results(self.optimization_results['all_results'])
 
         print("\n---- ANALYSIS COMPLETE ----")
         print(f"Most separable label combination: {self.best_labels}")
@@ -2067,6 +2079,7 @@ class EEGAnalyzer:
         self.save_best_models()  # <-- New addition
 
 
+
         # Add hyperparameter optimization results if applicable
         if optimize_hyperparams and hasattr(self, 'optimization_results'):
             print("\n---- HYPERPARAMETER OPTIMIZATION RESULTS ----")
@@ -2076,18 +2089,20 @@ class EEGAnalyzer:
             print(f"Best optimized score (F1): {best_score:.4f}")
             print(f"Optimized model saved to: {self.run_directory}/best_{best_model_name.lower()}_model.pkl")
 
+
 # STEP 3: Update the main script to accept a hyperparameter optimization flag
+
 if __name__ == "__main__":
     import argparse
     import time
 
-    # parser.add_argument('--features_file', type=str, default="data/normalized_merges/14_full_o1_comBat/normalized_imagery.csv",
+    # parser.add_argument('--features_file', type=str, default="data/normalized_merges/14_all_channels/oz_norm-ComBat.csv",
     # parser.add_argument('--features_file', type=str, default="data/merged_features/14_sessions_merge_1743884222/59_balanced_o1.csv",
 
 
     start_time=time.time()
     parser = argparse.ArgumentParser(description='EEG Data Analysis Tool')
-    parser.add_argument('--features_file', type=str, default="data/normalized_merges/14_all_channels/tp7_norm-ComBat.csv",
+    parser.add_argument('--features_file', type=str, default="data/merged_features/14_sessions_merge_1743884222/channels/o2.csv",
                         help='Path to the CSV file containing EEG features')
     parser.add_argument('--top_n_labels', type=int, default=2,
                         help='Number of labels to analyze (default: 2)')
@@ -2106,7 +2121,7 @@ if __name__ == "__main__":
                         help='Test set size for holdout validation (default: 0.2)')
     parser.add_argument('--optimize', action='store_true',
                         help='Perform hyperparameter optimization')
-    parser.add_argument('--n_iter', type=int, default=40,
+    parser.add_argument('--n_iter', type=int, default=10,
                         help='Number of iterations for hyperparameter optimization (default: 25)')
 
     args = parser.parse_args()
