@@ -15,7 +15,7 @@ import json
 import plotly.express as px
 import matplotlib.patches as patches
 import matplotlib.transforms as transforms
-from sklearn.model_selection import LeaveOneGroupOut  # NEW
+from sklearn.model_selection import LeaveOneGroupOut, LeavePGroupsOut  # NEW
 from sklearn.linear_model import LogisticRegression
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 from sklearn.ensemble import ExtraTreesClassifier, HistGradientBoostingClassifier
@@ -78,6 +78,7 @@ class EEGAnalyzer:
         cv_version="extended",  # extended or simple with a simple feature selection
         kfold_splits=5,
         test_size=0.2,
+        lmoso_leftout: int = 2,
         permu_count=1_000,
     ):  # For holdout validation
 
@@ -93,6 +94,7 @@ class EEGAnalyzer:
         self.kfold_splits = kfold_splits
         self.test_size = test_size
         self.permu_count = permu_count
+        self.lmoso_leftout = lmoso_leftout
         to_k = lambda n: (
             f"{n / 1000:.1f}k".rstrip("0").rstrip(".") if n >= 1000 else str(n)
         )
@@ -288,6 +290,12 @@ class EEGAnalyzer:
         elif self.cv_method == "loo":
             outer = LeaveOneGroupOut()
             inner = GroupShuffleSplit(n_splits=3, test_size=0.20, random_state=42)
+
+        elif self.cv_method == "lmoso":
+            outer = LeavePGroupsOut(self.lmoso_leftout)  # outer: leave-P-groups-out
+            inner = GroupShuffleSplit(
+                n_splits=3, test_size=0.20, random_state=42
+            )  # inner: shuffled groups
         else:  # "holdout" → no outer CV, keep inner only
             outer = None
             inner = StratifiedKFold(n_splits=3, shuffle=True, random_state=42)
@@ -443,9 +451,14 @@ class EEGAnalyzer:
             # always use the *simple* evaluator, but with groups
             cv_method = self._evaluate_with_cv_loso
 
+        elif self.cv_method == "lmoso":
+            print_log(f"Using Leave-{self.lmoso_leftout}-Sessions-Out CV")
+            cv = LeavePGroupsOut(self.lmoso_leftout)
+            cv_method = self._evaluate_with_cv_loso  # reuse the same evaluator
+
         else:
             raise ValueError(
-                "Invalid cv_method provided. Choose 'loo', 'kfold', or 'holdout'."
+                "Invalid cv_method provided. Choose 'loo', 'kfold', 'lmoso' or 'holdout'"
             )
 
         # Iterate over all possible label combinations (pairs or triplets)
@@ -461,7 +474,7 @@ class EEGAnalyzer:
 
             # FIX: Pass raw data to cv_method, which will handle scaling and feature selection properly
             # ---- call the correct evaluator ----
-            if self.cv_method == "loso":
+            if self.cv_method in ("loso", "lmoso"):
                 groups = df_subset["session"].values  # 1‑D array of session IDs
                 results = cv_method(X_subset, y_subset, models, cv, groups)
             else:
@@ -1927,48 +1940,108 @@ class EEGAnalyzer:
         }
         return search_spaces
 
+    # ── put this in EEGAnalyzer ──────────────────────────────────────────
     def _visualize_optimization_results(self, all_results):
         """
-        Visualize the optimization results.
-
-        Parameters:
-        all_results (dict): Results from optimization for all models.
+        Save optimisation-trajectory plots:
+            • one pair of PNGs per model
+            • one stacked overview (sorted-score & chronological)
         """
-        import numpy as np
-        import matplotlib.pyplot as plt
+        import os, numpy as np, matplotlib.pyplot as plt, math
 
-        plt.figure(figsize=(15, 10))
+        # 1. create sub-folder
+        prog_dir = os.path.join(self.run_directory, "optimization_progress")
+        os.makedirs(prog_dir, exist_ok=True)
 
-        for i, (model_name, results) in enumerate(all_results.items()):
-            # Sort by score to see the improvement
-            indices = np.argsort(results["scores"])
-            sorted_scores = np.array(results["scores"])[indices]
+        # 2. helper that returns two matplotlib figures for a model
+        def _make_figures(model, scores):
+            scores = np.asarray(scores)  # list → ndarray
+            sorted_idx = np.argsort(scores)
+            sorted_scores = scores[sorted_idx]
 
-            # Plot the optimization progress
-            plt.subplot(len(all_results), 1, i + 1)
-            plt.plot(
-                range(1, len(sorted_scores) + 1),
+            # ------- fig A : sorted by score -------
+            fig_sorted, ax = plt.subplots(figsize=(8, 4))
+            ax.plot(
+                np.arange(1, len(sorted_scores) + 1),
                 sorted_scores,
                 "o-",
-                label=f"{model_name} optimization",
+                label="inner-CV F1 (sorted)",
             )
-            plt.axhline(
-                y=max(results["scores"]),
+            ax.axhline(
+                sorted_scores.max(),
                 color="r",
-                linestyle="-",
-                label=f'Best score: {max(results["scores"]):.4f}',
+                ls="-",
+                label=f"Best = {sorted_scores.max():.4f}",
             )
-            plt.title(f"{model_name} Optimization Progress")
-            plt.xlabel("Iteration (sorted by score)")
-            plt.ylabel("F1 Score")
-            plt.grid(True)
-            plt.legend()
+            ax.set(
+                title=f"{model} – optimisation (best-first)",
+                xlabel="Iteration (ranked)",
+                ylabel="F1 score",
+            )
+            ax.legend()
+            ax.grid(True)
 
-        plt.tight_layout()
-        plt.savefig(f"{self.run_directory}/optimization_progress.png", dpi=300)
-        plt.close()
+            # ------- fig B : chronological -------
+            fig_time, ax2 = plt.subplots(figsize=(8, 4))
+            ax2.plot(
+                np.arange(1, len(scores) + 1),
+                scores,
+                "o-",
+                label="inner-CV F1 (chronological)",
+            )
+            ax2.axhline(
+                scores.max(), color="r", ls="-", label=f"Best = {scores.max():.4f}"
+            )
+            ax2.set(
+                title=f"{model} – optimisation (chronological)",
+                xlabel="Iteration",
+                ylabel="F1 score",
+            )
+            ax2.legend()
+            ax2.grid(True)
 
-        # Create feature importance for best model
+            return fig_sorted, fig_time
+
+        # 3. per-model PNGs
+        for mdl, res in all_results.items():
+            fig_s, fig_t = _make_figures(mdl, res["scores"])
+            fig_s.savefig(os.path.join(prog_dir, f"{mdl}_progress_sorted.png"), dpi=300)
+            fig_t.savefig(os.path.join(prog_dir, f"{mdl}_progress_time.png"), dpi=300)
+            plt.close(fig_s)
+            plt.close(fig_t)
+
+        # 4. combined overview (same as original idea, but cleaner)
+        n_models = len(all_results)
+        fig1, axes1 = plt.subplots(
+            n_models, 1, figsize=(12, 4 * n_models), sharex=False
+        )
+        fig2, axes2 = plt.subplots(
+            n_models, 1, figsize=(12, 4 * n_models), sharex=False
+        )
+
+        if n_models == 1:  # keep iterable even for one model
+            axes1, axes2 = [axes1], [axes2]
+
+        for ax_s, ax_t, (mdl, res) in zip(axes1, axes2, all_results.items()):
+            s = np.asarray(res["scores"])
+            # --- sorted
+            idx = np.argsort(s)
+            ax_s.plot(np.arange(1, len(s) + 1), s[idx], "o-")
+            ax_s.set(title=f"{mdl} (sorted)", ylabel="F1")
+            ax_s.grid(True)
+            # --- chronological
+            ax_t.plot(np.arange(1, len(s) + 1), s, "o-")
+            ax_t.set(title=f"{mdl} (chronological)", xlabel="Iteration", ylabel="F1")
+            ax_t.grid(True)
+
+        fig1.tight_layout()
+        fig2.tight_layout()
+        fig1.savefig(os.path.join(prog_dir, "overview_progress_sorted.png"), dpi=300)
+        fig2.savefig(os.path.join(prog_dir, "overview_progress_time.png"), dpi=300)
+        plt.close(fig1)
+        plt.close(fig2)
+
+        # 5. still call feature-importance visualisation
         self._visualize_best_model_feature_importance()
 
     def _visualize_best_model_feature_importance(self):
@@ -2168,10 +2241,16 @@ class EEGAnalyzer:
         df_best = self.df[self.df["label"].isin(self.best_labels)]
         X = df_best[self.feature_columns].values
         y = df_best["label"].values
-        groups = df_best["session"].values if self.cv_method == "loso" else None
-
+        groups = (
+            df_best["session"].values
+            if self.cv_method in {"loso", "lmoso"}  # ← include the new protocol
+            else None
+        )
         if self.cv_method == "loso":
             outer_splitter = LeaveOneGroupOut()
+            split_iter = outer_splitter.split(X, y, groups)
+        elif self.cv_method == "lmoso":
+            outer_splitter = LeavePGroupsOut(self.lmoso_leftout)
             split_iter = outer_splitter.split(X, y, groups)
         else:
             outer_splitter = StratifiedKFold(
@@ -2292,6 +2371,10 @@ class EEGAnalyzer:
         elif self.cv_method == "loso":
             cv = LeaveOneGroupOut()
             groups_eval = df_best["session"].values
+        elif self.cv_method == "lmoso":
+            cv = LeavePGroupsOut(self.lmoso_leftout)
+            groups_eval = df_best["session"].values
+
         else:  # TODO Holdout is not working properly, fix it
             from sklearn.model_selection import train_test_split
 
@@ -2308,7 +2391,7 @@ class EEGAnalyzer:
         y_pred_all = []
         misclassified_samples = []
 
-        if self.cv_method in ["loo", "kfold", "loso"]:
+        if self.cv_method in ["loo", "kfold", "loso", "lmoso"]:
             # Cross-validation approach (LOO or k-fold)
             for fold_idx, (train_idx, test_idx) in enumerate(
                 cv.split(X_best, y_best, groups=groups_eval)
@@ -2576,9 +2659,17 @@ if __name__ == "__main__":
         "--cv_method",
         type=str,
         default="loso",
-        choices=["loo", "kfold", "holdout", "loso"],
+        choices=["loo", "kfold", "holdout", "loso", "lmoso"],
         help="Cross-validation method (default: loo)",
     )
+
+    parser.add_argument(
+        "--lmoso_leftout",
+        type=int,
+        default=2,
+        help="How many sessions to leave out per fold when cv_method='lmoso'",
+    )
+
     parser.add_argument(
         "--cv_version",
         type=str,
@@ -2626,6 +2717,7 @@ if __name__ == "__main__":
         kfold_splits=args.kfold_splits,
         test_size=args.test_size,
         permu_count=args.permu_count,
+        lmoso_leftout=args.lmoso_leftout,
     )
 
     analyzer.run_complete_analysis(
