@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 import matplotlib.pyplot as plt
 import seaborn as sns
+from sklearn.calibration import CalibratedClassifierCV
 from tqdm import tqdm
 from collections import Counter
 from sklearn.preprocessing import StandardScaler
@@ -92,6 +93,11 @@ class SupremeTrainer:
         self.data_path = data_path
         self.random_state = random_state
 
+        # -----------------  NEW CONFIG PARAMS for educated confidence  -----------------
+        self.alpha_conf = 0.7  # 0 = ignore confidence, 1 = ignore global accuracy
+        self.conf_scale = "softmax"  # or 'minmax'  (how to normalise confidences)
+        # -------------------------------------------------------
+
         # Create model name formatter
         to_k = lambda n: (
             f"{n / 1000:.1f}k".rstrip("0").rstrip(".") if n >= 1000 else str(n)
@@ -128,6 +134,8 @@ class SupremeTrainer:
             f.write(f"Features to select: {n_features_to_select}\n")
             f.write(f"Permutation count: {permu_count}\n")
             f.write(f"Random state: {random_state}\n")
+            f.write(f"Alpha value {self.alpha_conf}\n")
+            f.write(f"Confidence scale: {self.conf_scale}\n")
 
         # Log environment info
         self._log_environment_info()
@@ -248,7 +256,7 @@ class SupremeTrainer:
             "rf": RandomForestClassifier(
                 n_estimators=100,
                 max_depth=4,
-                random_state=self.random_state,
+                random_state=48,
                 class_weight="balanced",
             ),
             "svm": SVC(
@@ -256,7 +264,7 @@ class SupremeTrainer:
                 C=1.0,
                 gamma="scale",
                 probability=True,
-                random_state=self.random_state,
+                random_state=42,
                 class_weight="balanced",
             ),
             "logreg": LogisticRegression(
@@ -264,18 +272,18 @@ class SupremeTrainer:
                 solver="saga",
                 l1_ratio=0.5,
                 max_iter=5000,
-                random_state=self.random_state,
+                random_state=42,
                 class_weight="balanced",
             ),
             "lda": LinearDiscriminantAnalysis(solver="lsqr", shrinkage="auto"),
             "et": ExtraTreesClassifier(
                 n_estimators=100,
                 max_depth=4,
-                random_state=self.random_state,
+                random_state=48,
                 class_weight="balanced",
             ),
             "hgb": HistGradientBoostingClassifier(
-                max_depth=3, random_state=self.random_state, class_weight="balanced"
+                max_depth=3, random_state=48, class_weight="balanced"
             ),
             "gnb": GaussianNB(),
             "knn": KNeighborsClassifier(n_neighbors=7, weights="distance"),
@@ -399,7 +407,8 @@ class SupremeTrainer:
         self, channel, model_code, X_train, y_train, groups_train=None, n_iter=25
     ):
         """
-        Tune hyperparameters and fit a pipeline for a channel-model.
+        Tune hyper‑parameters for <channel,model> and return a *calibrated*
+        probability‑producing pipeline.
 
         Args:
             channel (str): Channel name
@@ -412,84 +421,89 @@ class SupremeTrainer:
         Returns:
             Pipeline: Tuned and fitted pipeline
         """
-        if not SKOPT_AVAILABLE:
-            # If optimization not available, use the template pipeline
-            pipe = clone(self.template_pipelines[model_code])
-            pipe.fit(X_train, y_train)
-            return pipe
 
-        # Get search space for the model type
-        search_spaces = self._define_search_spaces()
-        if model_code not in search_spaces:
-            print_log(
-                self, f"Warning: No search space for model {model_code}. Using default."
-            )
-            pipe = clone(self.template_pipelines[model_code])
-            pipe.fit(X_train, y_train)
-            return pipe
-
-        # Set up inner CV
-        if groups_train is not None:
-            if self.cv_method == "loso":
-                inner_cv = GroupShuffleSplit(
-                    n_splits=3, test_size=0.2, random_state=self.random_state
-                )
-            elif self.cv_method == "lmoso":
-                inner_cv = GroupShuffleSplit(
-                    n_splits=3, test_size=0.2, random_state=self.random_state
+        # ---------- 1. Get a working pipeline (with or without Bayes‑opt) ----------
+        if not SKOPT_AVAILABLE or model_code not in self._define_search_spaces():
+            # fallback: use template as‑is
+            best_pipe = clone(self.template_pipelines[model_code]).fit(X_train, y_train)
+        else:
+            # -------- inner CV splitter  --------
+            if groups_train is not None:
+                # choose a group‑aware inner splitter
+                inner_cv = (
+                    GroupShuffleSplit(
+                        n_splits=3, test_size=0.2, random_state=self.random_state
+                    )
+                    if self.cv_method in ("loso", "lmoso")
+                    else StratifiedGroupKFold(
+                        n_splits=3, shuffle=True, random_state=self.random_state
+                    )
                 )
             else:
-                inner_cv = StratifiedGroupKFold(
+                inner_cv = StratifiedKFold(
                     n_splits=3, shuffle=True, random_state=self.random_state
                 )
-        else:
-            inner_cv = StratifiedKFold(
-                n_splits=3, shuffle=True, random_state=self.random_state
+
+            # -------- BayesSearch --------
+            base_pipe = clone(self.template_pipelines[model_code])
+            opt = BayesSearchCV(
+                base_pipe,
+                self._define_search_spaces()[model_code],
+                n_iter=n_iter,
+                cv=inner_cv,
+                scoring="f1_macro",
+                n_jobs=min(4, os.cpu_count()),
+                random_state=self.random_state,
+                verbose=0,
+            )
+            opt.fit(X_train, y_train, groups=groups_train)
+            best_pipe = opt.best_estimator_
+            best_params = opt.best_params_
+            best_score = opt.best_score_
+            print_log(
+                self,
+                f"Best params {channel}({model_code}): {best_params} | "
+                f"inner‑CV F1={best_score:.3f}",
             )
 
-        # Clone the template pipeline
-        base_pipe = clone(self.template_pipelines[model_code])
+            # persist parameters
+            with open(
+                f"{self.run_directory}/{channel}_{model_code}_best_params.json",
+                "w",
+                encoding="utf-8",
+            ) as f:
+                json.dump(
+                    {
+                        k: (str(v) if not isinstance(v, (int, float, str)) else v)
+                        for k, v in best_params.items()
+                    },
+                    f,
+                    indent=2,
+                )
 
-        # Set up Bayesian search
-        opt = BayesSearchCV(
-            base_pipe,
-            search_spaces[model_code],
-            n_iter=n_iter,
-            cv=inner_cv,
-            scoring="f1_macro",
-            n_jobs=min(4, os.cpu_count()),
-            random_state=self.random_state,
-            verbose=0,
+        # ---------- 2.  CALIBRATE probabilities  ----------
+        # many scikit models are over‑confident; use 3‑fold Platt scaling
+        calibrate_ok = isinstance(
+            best_pipe.named_steps["model"],
+            (
+                RandomForestClassifier,
+                ExtraTreesClassifier,
+                HistGradientBoostingClassifier,
+                KNeighborsClassifier,
+                LinearDiscriminantAnalysis,
+                GaussianNB,
+                LogisticRegression,
+                SVC,  # when probability=True
+            ),
         )
 
-        # Fit search
-        if groups_train is not None:
-            opt.fit(X_train, y_train, groups=groups_train)
-        else:
-            opt.fit(X_train, y_train)
-
-        # Get best pipeline and parameters
-        best_pipe = opt.best_estimator_
-        best_params = opt.best_params_
-        best_score = opt.best_score_
-
-        # Log best parameters
-        print_log(self, f"Best parameters for {channel} ({model_code}): {best_params}")
-        print_log(self, f"Best inner CV score: {best_score:.4f}")
-
-        # Save best parameters to JSON
-        with open(
-            f"{self.run_directory}/{channel}_{model_code}_best_params.json", "w"
-        ) as f:
-            json.dump(
-                {
-                    k: str(v) if not isinstance(v, (int, float, str)) else v
-                    for k, v in best_params.items()
-                },
-                f,
-                indent=2,
+        if calibrate_ok:
+            best_pipe = CalibratedClassifierCV(
+                best_pipe, method="sigmoid", cv=3  # Platt scaling
             )
+            best_pipe.fit(X_train, y_train)  # *** fit calibrator ***
 
+        # ---------- 3.  return calibrated pipeline ----------
         return best_pipe
 
     def run_loso_evaluation(self, n_iter=25, online_fusion=True):
@@ -499,19 +513,16 @@ class SupremeTrainer:
         Args:
             n_iter (int): Number of iterations for hyperparameter optimization
             online_fusion (bool): Whether to compute ensemble prediction during training
-                                 (True) or after all folds complete (False)
 
         Returns:
             dict: Complete evaluation results
         """
         print_log(self, "---- RUNNING LOSO EVALUATION ----")
 
-        # Get all unique sessions from a reference channel
         ref_channel = next(iter(self.channel_data.keys()))
         all_sessions = np.unique(self.channel_data[ref_channel]["session"])
         print_log(self, f"Found {len(all_sessions)} unique sessions: {all_sessions}")
 
-        # Ensure all channels have the same sessions
         for channel, df in self.channel_data.items():
             channel_sessions = np.unique(df["session"])
             if not np.array_equal(np.sort(all_sessions), np.sort(channel_sessions)):
@@ -522,24 +533,26 @@ class SupremeTrainer:
                 print_log(self, "Continuing with sessions common to all channels...")
                 all_sessions = np.intersect1d(all_sessions, channel_sessions)
 
-        # Prepare to store results
         fold_results = []
         channel_metrics = {
             channel: {"accuracy": [], "f1": []} for channel in self.channels_models
         }
         supreme_metrics = {"accuracy": [], "f1": []}
 
-        # Create CV splitter
+        # --- NEW: for sample-weighted metrics ---
+        all_supreme_true = []
+        all_supreme_pred = []
+        all_channel_true = {ch: [] for ch in self.channels_models}
+        all_channel_pred = {ch: [] for ch in self.channels_models}
+
         cv_splitter = self._get_cv_splitter()
 
-        # Loop through all sessions using LOSO CV
         for session_idx, test_session in enumerate(all_sessions):
             print_log(
                 self,
-                f"\n---- Fold {session_idx+1}/{len(all_sessions)} (Test Session: {test_session}) ----",
+                f"\n---- Fold {session_idx + 1}/{len(all_sessions)} (Test Session: {test_session}) ----",
             )
 
-            # Run channel-specific models for this fold
             fold_preds = {}
             fold_truths = None
 
@@ -547,11 +560,9 @@ class SupremeTrainer:
                 model_code = config["model"]
                 model_name = self._get_model_name(model_code)
 
-                # Get data for this channel
                 df = self.channel_data[channel]
                 df_subset = df[df["label"].isin(self.best_labels)]
 
-                # Create train/test split for this fold
                 train_mask = df_subset["session"] != test_session
                 test_mask = df_subset["session"] == test_session
 
@@ -562,38 +573,30 @@ class SupremeTrainer:
                 X_test = df_subset.loc[test_mask, self.feature_columns[channel]]
                 y_test = df_subset.loc[test_mask, "label"]
 
-                # Store true labels (same for all channels)
                 if fold_truths is None:
                     fold_truths = y_test.values
 
-                # Train and fit best model for this channel-fold
                 best_pipe = self._tune_and_fit_pipeline(
                     channel, model_code, X_train, y_train, groups_train, n_iter
                 )
 
-                # Predict on test set
                 y_pred = best_pipe.predict(X_test)
                 y_proba = best_pipe.predict_proba(X_test)
 
-                # Calculate metrics
                 acc = accuracy_score(y_test, y_pred)
                 f1 = f1_score(y_test, y_pred, average="macro")
 
-                # Store channel metrics
                 channel_metrics[channel]["accuracy"].append(acc)
                 channel_metrics[channel]["f1"].append(f1)
 
-                # Log channel performance
                 print_log(self, f"{channel} ({model_name}): Acc={acc:.4f}, F1={f1:.4f}")
 
-                # Store predictions for supreme model
                 fold_preds[channel] = {
                     "proba": y_proba,
                     "classes": best_pipe.classes_,
                     "pred": y_pred,
                 }
 
-                # Save predictions to disk for potential offline analysis
                 pred_data = {
                     "y_true": y_test.values.tolist(),
                     "y_pred": y_pred.tolist(),
@@ -606,47 +609,41 @@ class SupremeTrainer:
                 ) as f:
                     json.dump(pred_data, f)
 
-            # Online fusion: Compute supreme model predictions
+                # --- NEW: accumulate per-sample predictions ---
+                all_channel_true[channel].extend(y_test.values)
+                all_channel_pred[channel].extend(y_pred)
+
             if online_fusion:
-                # Learn weights from channel metrics on training folds
-                if session_idx > 0:  # After first fold we have some data
+                if session_idx > 0:
                     weights = self._compute_channel_weights(
                         channel_metrics, session_idx
                     )
                 else:
-                    # For first fold, use initial weights from config
-                    weights = {
-                        channel: config["accuracy"]
-                        for channel, config in self.channels_models.items()
-                    }
-                    # Normalize weights
                     weights = {}
                     for channel, config in self.channels_models.items():
                         acc = np.clip(config["accuracy"], 0.51, 0.99)
                         weights[channel] = np.log(acc / (1 - acc))
-
-                    # Normalize
                     total = sum(abs(w) for w in weights.values())
                     weights = {ch: w / total for ch, w in weights.items()}
 
-                # Weighted voting for supreme predictions
                 supreme_pred = self._weighted_voting(
                     fold_preds, weights, len(fold_truths)
                 )
 
-                # Calculate supreme metrics
                 supreme_acc = accuracy_score(fold_truths, supreme_pred)
                 supreme_f1 = f1_score(fold_truths, supreme_pred, average="macro")
 
-                # Store supreme metrics
                 supreme_metrics["accuracy"].append(supreme_acc)
                 supreme_metrics["f1"].append(supreme_f1)
+
+                # --- NEW: accumulate sample-level truth/pred ---
+                all_supreme_true.extend(fold_truths)
+                all_supreme_pred.extend(supreme_pred)
 
                 print_log(
                     self, f"Supreme model: Acc={supreme_acc:.4f}, F1={supreme_f1:.4f}"
                 )
 
-                # Store fold results
                 fold_results.append(
                     {
                         "fold": session_idx + 1,
@@ -666,14 +663,6 @@ class SupremeTrainer:
                     }
                 )
 
-        # Offline fusion (if needed): Compute supreme model after all folds are done
-        if not online_fusion:
-            print_log(self, "\n---- Performing Offline Fusion ----")
-            # This would be implemented if you prefer to analyze all predictions after completing CV
-            # Load saved predictions and compute weighted predictions
-            # ...
-
-        # Calculate overall metrics
         overall_results = {
             "channel_metrics": {
                 channel: {
@@ -697,46 +686,68 @@ class SupremeTrainer:
             "fold_results": fold_results,
         }
 
-        # Log overall results
+        # --- NEW: Add sample-weighted metrics ---
+        sample_weighted = {
+            "supreme_accuracy": accuracy_score(all_supreme_true, all_supreme_pred),
+            "supreme_f1": f1_score(all_supreme_true, all_supreme_pred, average="macro"),
+            "channels": {},
+        }
+        for ch in self.channels_models:
+            acc = accuracy_score(all_channel_true[ch], all_channel_pred[ch])
+            f1 = f1_score(all_channel_true[ch], all_channel_pred[ch], average="macro")
+            sample_weighted["channels"][ch] = {"accuracy": acc, "f1": f1}
+        overall_results["sample_weighted"] = sample_weighted
+
+        # --- Logging ---
         print_log(self, "\n---- OVERALL RESULTS ----")
-        print_log(self, "Channel performance:")
+        print_log(self, "Session-averaged channel performance:")
         for channel, metrics in overall_results["channel_metrics"].items():
             model_name = self._get_model_name(self.channels_models[channel]["model"])
             print_log(
                 self,
-                f"  {channel} ({model_name}): Acc={metrics['mean_accuracy']:.4f}±{metrics['std_accuracy']:.4f}, F1={metrics['mean_f1']:.4f}±{metrics['std_f1']:.4f}",
+                f"  {channel} ({model_name}): Acc={metrics['mean_accuracy']:.4f}±{metrics['std_accuracy']:.4f}, "
+                f"F1={metrics['mean_f1']:.4f}±{metrics['std_f1']:.4f}",
             )
-
-        supreme = overall_results["supreme_metrics"]
+        sup = overall_results["supreme_metrics"]
         print_log(
             self,
-            f"Supreme model: Acc={supreme['mean_accuracy']:.4f}±{supreme['std_accuracy']:.4f}, F1={supreme['mean_f1']:.4f}±{supreme['std_f1']:.4f}",
+            f"Supreme (session avg): Acc={sup['mean_accuracy']:.4f}±{sup['std_accuracy']:.4f}, "
+            f"F1={sup['mean_f1']:.4f}±{sup['std_f1']:.4f}",
         )
 
-        # Save results to JSON
-        with open(f"{self.run_directory}/evaluation_results.json", "w") as f:
-            # Convert numpy arrays to lists for JSON serialization
-            results_json = overall_results.copy()
+        # --- Sample-weighted metrics logging ---
+        print_log(self, "\n---- SAMPLE-WEIGHTED RESULTS ----")
+        print_log(
+            self,
+            f"Supreme (SW): Acc={sample_weighted['supreme_accuracy']:.4f}, F1={sample_weighted['supreme_f1']:.4f}",
+        )
+        for ch, m in sample_weighted["channels"].items():
+            print_log(self, f"{ch} (SW): Acc={m['accuracy']:.4f}, F1={m['f1']:.4f}")
 
+        # Save results to disk
+        with open(f"{self.run_directory}/evaluation_results.json", "w") as f:
+
+            def ensure_list(v):
+                return list(v) if isinstance(v, (np.ndarray, pd.Series)) else v
+
+            results_json = overall_results.copy()
             for channel in results_json["channel_metrics"]:
-                # these objects are *already* Python lists; just wrap defensively
-                results_json["channel_metrics"][channel]["per_fold_accuracy"] = list(
-                    results_json["channel_metrics"][channel]["per_fold_accuracy"]
+                results_json["channel_metrics"][channel]["per_fold_accuracy"] = (
+                    ensure_list(
+                        results_json["channel_metrics"][channel]["per_fold_accuracy"]
+                    )
                 )
-                results_json["channel_metrics"][channel]["per_fold_f1"] = list(
+                results_json["channel_metrics"][channel]["per_fold_f1"] = ensure_list(
                     results_json["channel_metrics"][channel]["per_fold_f1"]
                 )
-
-            results_json["supreme_metrics"]["per_fold_accuracy"] = list(
+            results_json["supreme_metrics"]["per_fold_accuracy"] = ensure_list(
                 results_json["supreme_metrics"]["per_fold_accuracy"]
             )
-            results_json["supreme_metrics"]["per_fold_f1"] = list(
+            results_json["supreme_metrics"]["per_fold_f1"] = ensure_list(
                 results_json["supreme_metrics"]["per_fold_f1"]
             )
-
             json.dump(results_json, f, indent=2)
 
-        # Save fold results to CSV for easier analysis
         fold_df = pd.DataFrame(fold_results)
         fold_df.to_csv(f"{self.run_directory}/fold_results.csv", index=False)
 
@@ -775,36 +786,44 @@ class SupremeTrainer:
 
         return weights
 
-    def _weighted_voting(self, fold_preds: dict, weights: dict, n_samples: int):
-        """
-        Combine channel predictions by probability‑level weighted voting.
+    def _weighted_voting(self, fold_preds: dict, global_w: dict, n_samples: int):
+        """Confidence‑aware dynamic fusion."""
+        sup_pred = []
 
-        Parameters
-        ----------
-        fold_preds : dict
-            {channel : {'proba': ndarray [n_samples, n_classes],
-                        'classes': ndarray [n_classes]}}
-        weights : dict
-            {channel : scalar weight (already normalised)}
-        n_samples : int
-            number of samples in the current outer‑test fold
-        """
-        supreme_pred = []
+        # pre‑compute softmax normaliser if requested
+        def _norm_conf(conf_dict):
+            if self.conf_scale == "softmax":
+                z = np.exp(list(conf_dict.values()))
+                return {k: v / np.sum(z) for k, v in zip(conf_dict, z)}
+            else:  # min‑max
+                lo, hi = min(conf_dict.values()), max(conf_dict.values())
+                rng = hi - lo or 1.0
+                return {k: (v - lo) / rng for k, v in conf_dict.items()}
 
         for i in range(n_samples):
-            # running sum of weighted probabilities
-            weighted_probs = {lbl: 0.0 for lbl in self.best_labels}
 
-            for channel, pred_pack in fold_preds.items():
-                w = weights[channel]
+            # 1) raw confidence from each channel = max‑probability for that sample
+            raw_conf = {
+                ch: float(pred_pack["proba"][i].max())
+                for ch, pred_pack in fold_preds.items()
+            }
+            loc_conf = _norm_conf(raw_conf)
+
+            # 2) final weight = α·local + (1‑α)·global
+            weights_i = {
+                ch: self.alpha_conf * loc_conf + (1 - self.alpha_conf) * global_w[ch]
+                for ch, loc_conf in loc_conf.items()
+            }
+
+            # 3) aggregate probabilities
+            agg_probs = {lbl: 0.0 for lbl in self.best_labels}
+            for ch, pred_pack in fold_preds.items():
                 for cls_idx, cls_val in enumerate(pred_pack["classes"]):
-                    weighted_probs[cls_val] += pred_pack["proba"][i, cls_idx] * w
+                    agg_probs[cls_val] += weights_i[ch] * pred_pack["proba"][i, cls_idx]
 
-            # **after** all channels have voted for this sample
-            best_class = max(weighted_probs, key=weighted_probs.get)
-            supreme_pred.append(best_class)
+            sup_pred.append(max(agg_probs, key=agg_probs.get))
 
-        return supreme_pred
+        return sup_pred
 
     def permutation_test(self, n_perm=None):
         if n_perm is None:
@@ -1520,27 +1539,27 @@ class SupremeTrainer:
         # Create a markdown report
         report = f"""# Supreme Model Analysis Report
 
-## Overview
-- **Analysis Date:** {time.strftime('%Y-%m-%d %H:%M:%S')}
-- **Channels & Models:** {', '.join([f"{ch} ({self._get_model_name(cfg['model'])})" for ch, cfg in self.channels_models.items()])}
-- **Cross-Validation Method:** {self.cv_method.upper()}
-- **Labels:** {', '.join(self.best_labels)}
-- **Features Selected per Model:** {self.n_features_to_select}
-- **Random Seed:** {self.random_state}
-
-## Supreme Model Performance
-- **Accuracy:** {evaluation_results['supreme_metrics']['mean_accuracy']:.4f} ± {evaluation_results['supreme_metrics']['std_accuracy']:.4f}
-- **F1 Score:** {evaluation_results['supreme_metrics']['mean_f1']:.4f} ± {evaluation_results['supreme_metrics']['std_f1']:.4f}
-- **Bootstrap 95% CI (Accuracy):** [{bootstrap_results['supreme']['acc_ci_low']:.4f}, {bootstrap_results['supreme']['acc_ci_high']:.4f}]
-- **Bootstrap 95% CI (F1):** [{bootstrap_results['supreme']['f1_ci_low']:.4f}, {bootstrap_results['supreme']['f1_ci_high']:.4f}]
-- **Permutation Test p-value (Accuracy):** {permutation_results['p_value_acc']:.4f}
-- **Permutation Test p-value (F1):** {permutation_results['p_value_f1']:.4f}
-
-## Individual Channel Performance
-
-| Channel | Model | Accuracy | F1 Score | Accuracy 95% CI | F1 Score 95% CI |
-|---------|-------|----------|----------|----------------|-----------------|
-"""
+        ## Overview
+        - **Analysis Date:** {time.strftime('%Y-%m-%d %H:%M:%S')}
+        - **Channels & Models:** {', '.join([f"{ch} ({self._get_model_name(cfg['model'])})" for ch, cfg in self.channels_models.items()])}
+        - **Cross-Validation Method:** {self.cv_method.upper()}
+        - **Labels:** {', '.join(self.best_labels)}
+        - **Features Selected per Model:** {self.n_features_to_select}
+        - **Random Seed:** {self.random_state}
+        
+        ## Supreme Model Performance
+        - **Accuracy:** {evaluation_results['supreme_metrics']['mean_accuracy']:.4f} ± {evaluation_results['supreme_metrics']['std_accuracy']:.4f}
+        - **F1 Score:** {evaluation_results['supreme_metrics']['mean_f1']:.4f} ± {evaluation_results['supreme_metrics']['std_f1']:.4f}
+        - **Bootstrap 95% CI (Accuracy):** [{bootstrap_results['supreme']['acc_ci_low']:.4f}, {bootstrap_results['supreme']['acc_ci_high']:.4f}]
+        - **Bootstrap 95% CI (F1):** [{bootstrap_results['supreme']['f1_ci_low']:.4f}, {bootstrap_results['supreme']['f1_ci_high']:.4f}]
+        - **Permutation Test p-value (Accuracy):** {permutation_results['p_value_acc']:.4f}
+        - **Permutation Test p-value (F1):** {permutation_results['p_value_f1']:.4f}
+        
+        ## Individual Channel Performance
+        
+        | Channel | Model | Accuracy | F1 Score | Accuracy 95% CI | F1 Score 95% CI |
+        |---------|-------|----------|----------|----------------|-----------------|
+        """
 
         # Add channel performance rows
         for channel in self.channels_models:
@@ -1690,13 +1709,18 @@ if __name__ == "__main__":
         with open(args.channels_config, "r") as f:
             channels_models = json.load(f)
     else:
-        # TODO see if you can make use of model's 'strong guesses', if the models are strongly sure (for example for RF, it can say that the information gain is very high), then we give them additional bonus points on their decision
+        # TODO see if you can make use of model's 'strong guesses', if the models are strongly
+        #  sure (for example for RF, it can say that the information gain is very high),
+        #  then we give them additional bonus points on their decision, if they are simply not
+        #  sure of their decision maybe we just make use of democracy then, or just trust the highest performing model,
+        #  it might also be that the models are all strong in similar manners, but its just their data at hand is
+        #  more or less difficult to deal with.
         # Example default configuration
         channels_models = {
             "o2_comBat": {"model": "rf", "accuracy": 0.718},
             # "po4_comBat": {"model": "knn", "accuracy": 0.613},
             "tp8_comBat": {"model": "rf", "accuracy": 0.682},
-            # "oz_comBat": {"model": "lda", "accuracy": 0.541},
+            "oz_comBat": {"model": "knn", "accuracy": 0.621},
         }
 
     # Create and run the supreme trainer
