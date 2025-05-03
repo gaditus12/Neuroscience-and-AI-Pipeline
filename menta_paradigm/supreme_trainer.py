@@ -1690,6 +1690,7 @@ if __name__ == "__main__":
         with open(args.channels_config, "r") as f:
             channels_models = json.load(f)
     else:
+        # TODO see if you can make use of model's 'strong guesses', if the models are strongly sure (for example for RF, it can say that the information gain is very high), then we give them additional bonus points on their decision
         # Example default configuration
         channels_models = {
             "o2_comBat": {"model": "rf", "accuracy": 0.718},
