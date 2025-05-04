@@ -424,6 +424,10 @@ class EEGAnalyzer:
             "kNN": KNeighborsClassifier(n_neighbors=7, weights="distance"),
         }
 
+        search_spaces = self._define_search_spaces()
+        for key, val in search_spaces.items():
+            if key not in models:
+                models.pop(key, None)
         # Choose CV method based on parameter
         if self.cv_method == "loo":
             print_log("Using Leave-One-Out cross validation")
@@ -1854,13 +1858,13 @@ class EEGAnalyzer:
         from skopt.space import Real, Integer, Categorical
 
         search_spaces = {
-            # ───────────────────────────────────────────────────────── Random Forest ──
+            # # ───────────────────────────────────────────────────────── Random Forest ──
             "RandomForest": {
                 "model": Categorical(
                     [RandomForestClassifier(random_state=42, n_jobs=-1)]
                 ),
                 "model__n_estimators": Integer(50, 150),  # fewer trees → less variance
-                "model__max_depth": Categorical([4]),  # very shallow
+                "model__max_depth": Integer(2, 4),  # very shallow
                 "model__min_samples_split": Integer(2, 6),
                 "model__min_samples_leaf": Integer(2, 8),  # prevents tiny leaves
                 "model__class_weight": Categorical(["balanced"]),
@@ -1906,7 +1910,7 @@ class EEGAnalyzer:
                 "model__min_samples_leaf": Integer(2, 6),
                 "feature_selection__k": Integer(3, 20),
             },
-            # ────────────────────────────────────────── HistGradientBoosting ──
+            # # ────────────────────────────────────────── HistGradientBoosting ──
             "HGBClassifier": {
                 "model": Categorical(
                     [
@@ -1920,19 +1924,19 @@ class EEGAnalyzer:
                 "model__max_iter": Integer(60, 100),
                 "feature_selection__k": Integer(3, 20),
             },
-            # ───────────────────────────────────────────────────── k‑Nearest Nbrs ──
+            # # ───────────────────────────────────────────────────── k‑Nearest Nbrs ──
             "kNN": {
                 "model": Categorical([KNeighborsClassifier()]),
                 "model__n_neighbors": Integer(5, 15),  # ≥5 to limit variance
                 "model__weights": Categorical(["uniform", "distance"]),
                 "feature_selection__k": Integer(3, 20),
             },
-            # ────────────────────────────────────────────── Gaussian Naïve Bayes ──
+            # # ────────────────────────────────────────────── Gaussian Naïve Bayes ──
             "GaussianNB": {
                 "model": Categorical([GaussianNB()])
                 # no hyper‑params
             },
-            # ────────────────────────────────────────────── Shrinkage LDA ──
+            # # ────────────────────────────────────────────── Shrinkage LDA ──
             "ShrinkageLDA": {
                 "model": Categorical([LinearDiscriminantAnalysis(solver="lsqr")]),
                 "model__shrinkage": Categorical(["auto", 0.1, 0.3, None]),
@@ -2633,7 +2637,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--features_file",
         type=str,
-        default="o2_raw",
+        default="o2_comBat",
         help="Path to the CSV file containing EEG features",
     )
     parser.add_argument(
