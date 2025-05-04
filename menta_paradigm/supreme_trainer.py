@@ -66,6 +66,7 @@ class SupremeTrainer:
         permu_count=1000,
         data_path="data/final_sets/all_channels_binary",
         random_state=42,
+        n_iter=10,
     ):
         """
         Initialize the SupremeTrainer with multiple channel-model pairs and configuration.
@@ -83,6 +84,7 @@ class SupremeTrainer:
             random_state (int): Random seed for reproducibility
         """
         # Store configuration parameters
+        self.evaluation_results = None
         self.channels_models = channels_models
         self.top_n_labels = top_n_labels
         self.n_features_to_select = n_features_to_select
@@ -94,7 +96,7 @@ class SupremeTrainer:
         self.random_state = random_state
 
         # -----------------  NEW CONFIG PARAMS for educated confidence  -----------------
-        self.alpha_conf = 0.7  # 0 = ignore confidence, 1 = ignore global accuracy
+        self.alpha_conf = 0.5  # 0 = ignore confidence, 1 = ignore global accuracy
         self.conf_scale = "softmax"  # or 'minmax'  (how to normalise confidences)
         # -------------------------------------------------------
 
@@ -111,7 +113,7 @@ class SupremeTrainer:
         )
         self.run_directory = os.path.join(
             "supreme_model_outputs",
-            f"{chan_models_str}_{cv_method}_{permu_count_str}_run_{timestamp}",
+            f"entropy_alpha({self.alpha_conf})_{chan_models_str}_{cv_method}_{n_iter}BO_{permu_count_str}Permu_run_{timestamp}",
         )
         os.makedirs(self.run_directory, exist_ok=True)
 
@@ -387,21 +389,34 @@ class SupremeTrainer:
 
     def _get_cv_splitter(self):
         """
-        Create appropriate CV splitters based on CV method.
-
-        Returns:
-            object: CV splitter object for the current CV method
+        Outer‑CV splitter according to self.cv_method
         """
         if self.cv_method == "loso":
             return LeaveOneGroupOut()
         elif self.cv_method == "lmoso":
             return LeavePGroupsOut(self.lmoso_leftout)
-        elif self.cv_method == "kfold":
-            return StratifiedGroupKFold(
+        elif self.cv_method == "kfold":  # <‑‑ NEW
+            # plain stratified (no grouping) –shuffled & reproducible
+            return StratifiedKFold(
                 n_splits=self.kfold_splits, shuffle=True, random_state=self.random_state
             )
         else:
             raise ValueError(f"Unsupported CV method: {self.cv_method}")
+
+    # ---------------------------------------------------------------------
+    #  Return *one* canonical tag for the current outer‑CV split
+    #  • LOSO  → "session_<id>"
+    #  • kfold → "fold<i>"
+    #  • LMOSO → "lmoso_<id1>_<id2>_..."   (order preserved for uniqueness)
+    # ---------------------------------------------------------------------
+    def _make_fold_tag(self, held_out_sessions, fold_idx=None):
+        if self.cv_method == "kfold":
+            return f"fold{fold_idx}"
+        if self.cv_method == "loso":
+            return f"session_{held_out_sessions[0]}"
+        # LMOSO → list/tuple of sessions
+        flat = "_".join(map(str, held_out_sessions))
+        return f"lmoso_{flat}"
 
     def _tune_and_fit_pipeline(
         self, channel, model_code, X_train, y_train, groups_train=None, n_iter=25
@@ -506,76 +521,99 @@ class SupremeTrainer:
         # ---------- 3.  return calibrated pipeline ----------
         return best_pipe
 
-    def run_loso_evaluation(self, n_iter=25, online_fusion=True):
+    # ---------------------------------------------------------------------------
+    #  General outer‑CV loop (replaces the old run_loso_evaluation)
+    # ---------------------------------------------------------------------------
+    def _run_outer_cv(self, n_iter: int = 25, online_fusion: bool = True):
         """
-        Run LOSO evaluation, training models for each fold and evaluating the supreme model.
+        Run the full outer‑CV evaluation (LOSO, LMOSO or stratified k‑fold) and
+        compute channel‑level + supreme‑model performance.
 
-        Args:
-            n_iter (int): Number of iterations for hyperparameter optimization
-            online_fusion (bool): Whether to compute ensemble prediction during training
-
-        Returns:
-            dict: Complete evaluation results
+        Returns
+        -------
+        dict  # identical structure to the old run_loso_evaluation output
         """
-        print_log(self, "---- RUNNING LOSO EVALUATION ----")
+        print_log(self, f"---- RUNNING {self.cv_method.upper()} EVALUATION ----")
 
+        # ------------------------------------------------------------------ #
+        # 1) Build a *reference* dataframe that drives the outer splitter    #
+        # ------------------------------------------------------------------ #
         ref_channel = next(iter(self.channel_data.keys()))
-        all_sessions = np.unique(self.channel_data[ref_channel]["session"])
-        print_log(self, f"Found {len(all_sessions)} unique sessions: {all_sessions}")
+        ref_df = (
+            self.channel_data[ref_channel]
+            .loc[lambda d: d["label"].isin(self.best_labels)]
+            .reset_index(drop=True)
+        )
 
-        for channel, df in self.channel_data.items():
-            channel_sessions = np.unique(df["session"])
-            if not np.array_equal(np.sort(all_sessions), np.sort(channel_sessions)):
-                print_log(
-                    self,
-                    f"Warning: Channel {channel} has different sessions: {channel_sessions}",
-                )
-                print_log(self, "Continuing with sessions common to all channels...")
-                all_sessions = np.intersect1d(all_sessions, channel_sessions)
+        y_ref = ref_df["label"].values
+        groups_ref = (
+            ref_df["session"].values if self.cv_method in ("loso", "lmoso") else None
+        )
 
+        outer_splitter = self._get_cv_splitter()
+        if groups_ref is not None:
+            outer_folds = list(
+                outer_splitter.split(np.zeros(len(ref_df)), y_ref, groups_ref)
+            )
+        else:  # k‑fold
+            outer_folds = list(outer_splitter.split(np.zeros(len(ref_df)), y_ref))
+
+        print_log(self, f"Outer CV : {len(outer_folds)} folds")
+
+        # ------------------------------------------------------------------ #
+        # 2) Containers                                                      #
+        # ------------------------------------------------------------------ #
         fold_results = []
         channel_metrics = {
-            channel: {"accuracy": [], "f1": []} for channel in self.channels_models
+            ch: {"accuracy": [], "f1": []} for ch in self.channels_models
         }
         supreme_metrics = {"accuracy": [], "f1": []}
 
-        # --- NEW: for sample-weighted metrics ---
-        all_supreme_true = []
-        all_supreme_pred = []
+        # sample‑weighted containers
+        all_supreme_true, all_supreme_pred = [], []
         all_channel_true = {ch: [] for ch in self.channels_models}
         all_channel_pred = {ch: [] for ch in self.channels_models}
 
-        cv_splitter = self._get_cv_splitter()
+        # ------------------------------------------------------------------ #
+        # 3) Outer loop                                                      #
+        # ------------------------------------------------------------------ #
+        for fold_i, (train_idx, test_idx) in enumerate(outer_folds, start=1):
+            print_log(self, f"\n---- Fold {fold_i}/{len(outer_folds)} ----")
 
-        for session_idx, test_session in enumerate(all_sessions):
-            print_log(
-                self,
-                f"\n---- Fold {session_idx + 1}/{len(all_sessions)} (Test Session: {test_session}) ----",
-            )
+            fold_preds, fold_truths = {}, None
 
-            fold_preds = {}
-            fold_truths = None
-
-            for channel, config in self.channels_models.items():
-                model_code = config["model"]
+            for channel, cfg in self.channels_models.items():
+                model_code = cfg["model"]
                 model_name = self._get_model_name(model_code)
 
-                df = self.channel_data[channel]
-                df_subset = df[df["label"].isin(self.best_labels)]
+                # ------- slice the channel dataframe in *exactly* the same way -------
+                df_ch = (
+                    self.channel_data[channel]
+                    .loc[lambda d: d["label"].isin(self.best_labels)]
+                    .reset_index(drop=True)
+                )
+                if len(df_ch) != len(ref_df):
+                    raise ValueError(
+                        f"Channel {channel} has {len(df_ch)} samples, "
+                        f"reference channel {ref_channel} has {len(ref_df)}. "
+                        "Ensure all channels contain the same rows in the same order."
+                    )
 
-                train_mask = df_subset["session"] != test_session
-                test_mask = df_subset["session"] == test_session
+                X_train = df_ch.iloc[train_idx][self.feature_columns[channel]]
+                y_train = df_ch.iloc[train_idx]["label"]
+                X_test = df_ch.iloc[test_idx][self.feature_columns[channel]]
+                y_test = df_ch.iloc[test_idx]["label"]
 
-                X_train = df_subset.loc[train_mask, self.feature_columns[channel]]
-                y_train = df_subset.loc[train_mask, "label"]
-                groups_train = df_subset.loc[train_mask, "session"].values
-
-                X_test = df_subset.loc[test_mask, self.feature_columns[channel]]
-                y_test = df_subset.loc[test_mask, "label"]
+                groups_train = (
+                    df_ch.iloc[train_idx]["session"].values
+                    if self.cv_method in ("loso", "lmoso")
+                    else None
+                )
 
                 if fold_truths is None:
                     fold_truths = y_test.values
 
+                # ------------------ fit + predict ------------------
                 best_pipe = self._tune_and_fit_pipeline(
                     channel, model_code, X_train, y_train, groups_train, n_iter
                 )
@@ -588,7 +626,6 @@ class SupremeTrainer:
 
                 channel_metrics[channel]["accuracy"].append(acc)
                 channel_metrics[channel]["f1"].append(f1)
-
                 print_log(self, f"{channel} ({model_name}): Acc={acc:.4f}, F1={f1:.4f}")
 
                 fold_preds[channel] = {
@@ -597,83 +634,98 @@ class SupremeTrainer:
                     "pred": y_pred,
                 }
 
-                pred_data = {
-                    "y_true": y_test.values.tolist(),
-                    "y_pred": y_pred.tolist(),
-                    "y_proba": y_proba.tolist(),
-                    "classes": best_pipe.classes_.tolist(),
-                }
-                with open(
-                    f"{self.fold_predictions_dir}/{channel}_{test_session}_preds.json",
-                    "w",
-                ) as f:
-                    json.dump(pred_data, f)
+                held_out = (
+                    df_ch.iloc[test_idx]["session"].unique()
+                    if self.cv_method != "kfold"
+                    else None
+                )
 
-                # --- NEW: accumulate per-sample predictions ---
-                all_channel_true[channel].extend(y_test.values)
-                all_channel_pred[channel].extend(y_pred)
+                # archive predictions (fold tag differs for k‑fold vs LOSO)
 
-            if online_fusion:
-                if session_idx > 0:
-                    weights = self._compute_channel_weights(
-                        channel_metrics, session_idx
+                fold_tag = self._make_fold_tag(held_out, fold_i)
+                pred_path = (
+                    f"{self.fold_predictions_dir}/{channel}_{fold_tag}_preds.json"
+                )
+                with open(pred_path, "w") as f:
+                    json.dump(
+                        {
+                            "y_true": y_test.tolist(),
+                            "y_pred": y_pred.tolist(),
+                            "y_proba": y_proba.tolist(),
+                            "classes": best_pipe.classes_.tolist(),
+                        },
+                        f,
                     )
-                else:
-                    weights = {}
-                    for channel, config in self.channels_models.items():
-                        acc = np.clip(config["accuracy"], 0.51, 0.99)
-                        weights[channel] = np.log(acc / (1 - acc))
-                    total = sum(abs(w) for w in weights.values())
-                    weights = {ch: w / total for ch, w in weights.items()}
+
+                # --- for sample‑weighted metrics ---
+                all_channel_true[channel].extend(y_test.tolist())
+                all_channel_pred[channel].extend(y_pred.tolist())
+
+            # ------------------ supreme fusion ------------------
+            if online_fusion:
+                if fold_i > 1:
+                    weights = self._compute_channel_weights(channel_metrics, fold_i - 1)
+                else:  # first fold – initialise with cfg accuracies
+                    init_w = {
+                        ch: np.clip(cfg["accuracy"], 0.51, 0.99)
+                        for ch, cfg in self.channels_models.items()
+                    }
+                    weights = {ch: np.log(a / (1 - a)) for ch, a in init_w.items()}
+                    s = sum(abs(w) for w in weights.values())
+                    weights = {ch: w / s for ch, w in weights.items()}
 
                 supreme_pred = self._weighted_voting(
                     fold_preds, weights, len(fold_truths)
                 )
 
-                supreme_acc = accuracy_score(fold_truths, supreme_pred)
-                supreme_f1 = f1_score(fold_truths, supreme_pred, average="macro")
+                sup_acc = accuracy_score(fold_truths, supreme_pred)
+                sup_f1 = f1_score(fold_truths, supreme_pred, average="macro")
 
-                supreme_metrics["accuracy"].append(supreme_acc)
-                supreme_metrics["f1"].append(supreme_f1)
+                supreme_metrics["accuracy"].append(sup_acc)
+                supreme_metrics["f1"].append(sup_f1)
 
-                # --- NEW: accumulate sample-level truth/pred ---
                 all_supreme_true.extend(fold_truths)
                 all_supreme_pred.extend(supreme_pred)
 
-                print_log(
-                    self, f"Supreme model: Acc={supreme_acc:.4f}, F1={supreme_f1:.4f}"
-                )
+                print_log(self, f"Supreme model: Acc={sup_acc:.4f}, F1={sup_f1:.4f}")
 
+                # ----------------- record this fold -----------------
                 fold_results.append(
                     {
-                        "fold": session_idx + 1,
-                        "test_session": test_session,
+                        "fold": fold_i,
+                        "fold_tag": fold_tag,
+                        "held_out_tag": (
+                            df_ch.iloc[test_idx]["session"].iloc[0]
+                            if self.cv_method != "kfold"
+                            else f"fold{fold_i}"
+                        ),
                         "channel_metrics": {
                             ch: {
-                                "accuracy": channel_metrics[ch]["accuracy"][
-                                    session_idx
-                                ],
-                                "f1": channel_metrics[ch]["f1"][session_idx],
+                                "accuracy": channel_metrics[ch]["accuracy"][-1],
+                                "f1": channel_metrics[ch]["f1"][-1],
                             }
                             for ch in self.channels_models
                         },
-                        "supreme_accuracy": supreme_acc,
-                        "supreme_f1": supreme_f1,
+                        "supreme_accuracy": sup_acc,
+                        "supreme_f1": sup_f1,
                         "weights": weights,
                     }
                 )
 
+        # ------------------------------------------------------------------ #
+        # 4) Aggregate metrics                                               #
+        # ------------------------------------------------------------------ #
         overall_results = {
             "channel_metrics": {
-                channel: {
-                    "mean_accuracy": np.mean(metrics["accuracy"]),
-                    "std_accuracy": np.std(metrics["accuracy"]),
-                    "mean_f1": np.mean(metrics["f1"]),
-                    "std_f1": np.std(metrics["f1"]),
-                    "per_fold_accuracy": metrics["accuracy"],
-                    "per_fold_f1": metrics["f1"],
+                ch: {
+                    "mean_accuracy": np.mean(m["accuracy"]),
+                    "std_accuracy": np.std(m["accuracy"]),
+                    "mean_f1": np.mean(m["f1"]),
+                    "std_f1": np.std(m["f1"]),
+                    "per_fold_accuracy": m["accuracy"],
+                    "per_fold_f1": m["f1"],
                 }
-                for channel, metrics in channel_metrics.items()
+                for ch, m in channel_metrics.items()
             },
             "supreme_metrics": {
                 "mean_accuracy": np.mean(supreme_metrics["accuracy"]),
@@ -686,71 +738,44 @@ class SupremeTrainer:
             "fold_results": fold_results,
         }
 
-        # --- NEW: Add sample-weighted metrics ---
-        sample_weighted = {
-            "supreme_accuracy": accuracy_score(all_supreme_true, all_supreme_pred),
-            "supreme_f1": f1_score(all_supreme_true, all_supreme_pred, average="macro"),
-            "channels": {},
+        # ---- sample‑weighted summary (always reported) ----
+        sw_acc = accuracy_score(all_supreme_true, all_supreme_pred)
+        sw_f1 = f1_score(all_supreme_true, all_supreme_pred, average="macro")
+        overall_results["sample_weighted"] = {
+            "supreme_accuracy": sw_acc,
+            "supreme_f1": sw_f1,
+            "channels": {
+                ch: {
+                    "accuracy": accuracy_score(
+                        all_channel_true[ch], all_channel_pred[ch]
+                    ),
+                    "f1": f1_score(
+                        all_channel_true[ch], all_channel_pred[ch], average="macro"
+                    ),
+                }
+                for ch in self.channels_models
+            },
         }
-        for ch in self.channels_models:
-            acc = accuracy_score(all_channel_true[ch], all_channel_pred[ch])
-            f1 = f1_score(all_channel_true[ch], all_channel_pred[ch], average="macro")
-            sample_weighted["channels"][ch] = {"accuracy": acc, "f1": f1}
-        overall_results["sample_weighted"] = sample_weighted
 
-        # --- Logging ---
+        # ----------------  pretty print  ----------------
         print_log(self, "\n---- OVERALL RESULTS ----")
-        print_log(self, "Session-averaged channel performance:")
-        for channel, metrics in overall_results["channel_metrics"].items():
-            model_name = self._get_model_name(self.channels_models[channel]["model"])
+        for ch, m in overall_results["channel_metrics"].items():
+            model_name = self._get_model_name(self.channels_models[ch]["model"])
             print_log(
                 self,
-                f"  {channel} ({model_name}): Acc={metrics['mean_accuracy']:.4f}±{metrics['std_accuracy']:.4f}, "
-                f"F1={metrics['mean_f1']:.4f}±{metrics['std_f1']:.4f}",
+                f"{ch} ({model_name}): "
+                f"Acc={m['mean_accuracy']:.4f}±{m['std_accuracy']:.4f}, "
+                f"F1={m['mean_f1']:.4f}±{m['std_f1']:.4f}",
             )
         sup = overall_results["supreme_metrics"]
         print_log(
             self,
-            f"Supreme (session avg): Acc={sup['mean_accuracy']:.4f}±{sup['std_accuracy']:.4f}, "
+            f"Supreme (fold‑avg): Acc={sup['mean_accuracy']:.4f}±{sup['std_accuracy']:.4f}, "
             f"F1={sup['mean_f1']:.4f}±{sup['std_f1']:.4f}",
         )
+        print_log(self, f"Supreme (sample‑weighted): Acc={sw_acc:.4f}, F1={sw_f1:.4f}")
 
-        # --- Sample-weighted metrics logging ---
-        print_log(self, "\n---- SAMPLE-WEIGHTED RESULTS ----")
-        print_log(
-            self,
-            f"Supreme (SW): Acc={sample_weighted['supreme_accuracy']:.4f}, F1={sample_weighted['supreme_f1']:.4f}",
-        )
-        for ch, m in sample_weighted["channels"].items():
-            print_log(self, f"{ch} (SW): Acc={m['accuracy']:.4f}, F1={m['f1']:.4f}")
-
-        # Save results to disk
-        with open(f"{self.run_directory}/evaluation_results.json", "w") as f:
-
-            def ensure_list(v):
-                return list(v) if isinstance(v, (np.ndarray, pd.Series)) else v
-
-            results_json = overall_results.copy()
-            for channel in results_json["channel_metrics"]:
-                results_json["channel_metrics"][channel]["per_fold_accuracy"] = (
-                    ensure_list(
-                        results_json["channel_metrics"][channel]["per_fold_accuracy"]
-                    )
-                )
-                results_json["channel_metrics"][channel]["per_fold_f1"] = ensure_list(
-                    results_json["channel_metrics"][channel]["per_fold_f1"]
-                )
-            results_json["supreme_metrics"]["per_fold_accuracy"] = ensure_list(
-                results_json["supreme_metrics"]["per_fold_accuracy"]
-            )
-            results_json["supreme_metrics"]["per_fold_f1"] = ensure_list(
-                results_json["supreme_metrics"]["per_fold_f1"]
-            )
-            json.dump(results_json, f, indent=2)
-
-        fold_df = pd.DataFrame(fold_results)
-        fold_df.to_csv(f"{self.run_directory}/fold_results.csv", index=False)
-
+        # cache for later steps (permutation‑test, bootstrap, plots, …)
         self.evaluation_results = overall_results
         return overall_results
 
@@ -787,40 +812,46 @@ class SupremeTrainer:
         return weights
 
     def _weighted_voting(self, fold_preds: dict, global_w: dict, n_samples: int):
-        """Confidence‑aware dynamic fusion."""
+        """Entropy-aware dynamic fusion voting."""
+
         sup_pred = []
 
-        # pre‑compute softmax normaliser if requested
-        def _norm_conf(conf_dict):
-            if self.conf_scale == "softmax":
-                z = np.exp(list(conf_dict.values()))
-                return {k: v / np.sum(z) for k, v in zip(conf_dict, z)}
-            else:  # min‑max
-                lo, hi = min(conf_dict.values()), max(conf_dict.values())
-                rng = hi - lo or 1.0
-                return {k: (v - lo) / rng for k, v in conf_dict.items()}
+        num_classes = len(self.best_labels)
+
+        from scipy.stats import entropy
 
         for i in range(n_samples):
-
-            # 1) raw confidence from each channel = max‑probability for that sample
-            raw_conf = {
-                ch: float(pred_pack["proba"][i].max())
+            # 1) compute entropy for each channel's prediction
+            raw_entropy = {
+                ch: entropy(pred_pack["proba"][i])
                 for ch, pred_pack in fold_preds.items()
             }
-            loc_conf = _norm_conf(raw_conf)
 
-            # 2) final weight = α·local + (1‑α)·global
-            weights_i = {
-                ch: self.alpha_conf * loc_conf + (1 - self.alpha_conf) * global_w[ch]
-                for ch, loc_conf in loc_conf.items()
+            # 2) invert + normalize entropy (lower entropy = higher confidence)
+            inv_entropy = {
+                ch: 1.0 - (ent / np.log(num_classes)) for ch, ent in raw_entropy.items()
             }
 
-            # 3) aggregate probabilities
+            z = np.array(list(inv_entropy.values()))
+            z_sum = np.sum(z) or 1e-8  # prevent div by zero
+            norm_entropy_conf = {
+                ch: val / z_sum for ch, val in zip(inv_entropy.keys(), z)
+            }
+
+            # 3) combine with global weight
+            weights_i = {
+                ch: self.alpha_conf * norm_entropy_conf[ch]
+                + (1 - self.alpha_conf) * global_w[ch]
+                for ch in fold_preds
+            }
+
+            # 4) aggregate weighted probabilities
             agg_probs = {lbl: 0.0 for lbl in self.best_labels}
             for ch, pred_pack in fold_preds.items():
                 for cls_idx, cls_val in enumerate(pred_pack["classes"]):
                     agg_probs[cls_val] += weights_i[ch] * pred_pack["proba"][i, cls_idx]
 
+            # 5) final supreme prediction = class with highest combined prob
             sup_pred.append(max(agg_probs, key=agg_probs.get))
 
         return sup_pred
@@ -1229,261 +1260,204 @@ class SupremeTrainer:
         plt.savefig(f"{self.run_directory}/model_f1_comparison.png", dpi=300)
         plt.close()
 
+    # ------------------------------------------------------------------
+    #  Confusion matrices (channel‑level only – supreme can be added
+    #  similarly if you save its per‑sample predictions).
+    # ------------------------------------------------------------------
     def plot_confusion_matrices(self):
         """
-        Plot confusion matrices for each channel and the supreme model.
+        Plot (pooled) confusion matrices for every channel.
+        Works transparently for LOSO, LMOSO and stratified k‑fold.
         """
         if not hasattr(self, "evaluation_results"):
-            print_log(
-                self, "No evaluation results available. Run run_loso_evaluation first."
-            )
+            print_log(self, "No evaluation results available – run analysis first.")
             return
 
         print_log(self, "---- PLOTTING CONFUSION MATRICES ----")
 
-        # Load fold predictions for each channel and the supreme model
-        # For each session (fold)
-        ref_channel = next(iter(self.channel_data.keys()))
-        all_sessions = np.unique(self.channel_data[ref_channel]["session"])
+        # ----------------------------------------------------------
+        # 1)  Which prediction files do we need to open?
+        # ----------------------------------------------------------
+        fold_tags = [fr["fold_tag"] for fr in self.evaluation_results["fold_results"]]
 
-        # Initialize confusion matrices
         cm_channels = {
-            channel: np.zeros((len(self.best_labels), len(self.best_labels)))
-            for channel in self.channels_models
+            ch: np.zeros((len(self.best_labels), len(self.best_labels)), dtype=int)
+            for ch in self.channels_models
         }
-        cm_supreme = np.zeros((len(self.best_labels), len(self.best_labels)))
 
-        # Collect predictions across all folds
-        all_true = []
-        all_pred_supreme = []
-        all_pred_channels = {channel: [] for channel in self.channels_models}
-
-        # For each session (fold)
-        for test_session in all_sessions:
-            # Load predictions for each channel
-            for channel in self.channels_models:
-                pred_file = (
-                    f"{self.fold_predictions_dir}/{channel}_{test_session}_preds.json"
+        for tag in fold_tags:
+            for ch in self.channels_models:
+                fpath = os.path.join(
+                    self.fold_predictions_dir, f"{ch}_{tag}_preds.json"
                 )
-
-                if not os.path.exists(pred_file):
-                    print_log(
-                        self,
-                        f"Warning: Prediction file {pred_file} not found. Skipping.",
-                    )
+                if not os.path.exists(fpath):
+                    print_log(self, f"Warning: {fpath} missing – skipped.")
                     continue
+                with open(fpath) as f:
+                    pdict = json.load(f)
 
-                with open(pred_file, "r") as f:
-                    pred_data = json.load(f)
+                y_true = np.asarray(pdict["y_true"])
+                y_pred = np.asarray(pdict["y_pred"])
 
-                # Get true and predicted labels
-                y_true = np.array(pred_data["y_true"])
-                y_pred = np.array(pred_data["y_pred"])
-
-                # Accumulate for channel confusion matrix
-                all_true.extend(y_true)
-                all_pred_channels[channel].extend(y_pred)
-
-                # Update channel confusion matrix
-                cm_channels[channel] += confusion_matrix(
+                cm_channels[ch] += confusion_matrix(
                     y_true, y_pred, labels=self.best_labels
                 )
 
-        # Compute supreme confusion matrix
-        # Note: This requires either recomputing supreme predictions or loading them
-        # For simplicity, we'll use the fold results and assume supreme predictions are saved
-        # In practice, you should save supreme predictions during run_loso_evaluation
-
-        # Plot channel confusion matrices
-        n_channels = len(self.channels_models)
+        # ----------------------------------------------------------
+        # 2)  Plot
+        # ----------------------------------------------------------
+        n_channels = len(cm_channels)
         n_cols = min(3, n_channels)
         n_rows = (n_channels + n_cols - 1) // n_cols
 
-        fig, ax_arr = plt.subplots(n_rows, n_cols, figsize=(n_cols * 5, n_rows * 4))
-        ax_list: list[plt.Axes] = (
-            [ax_arr] if not isinstance(ax_arr, np.ndarray) else ax_arr.ravel().tolist()
+        fig, ax_arr = plt.subplots(n_rows, n_cols, figsize=(5 * n_cols, 4 * n_rows))
+        ax_list = (
+            ax_arr.ravel().tolist() if isinstance(ax_arr, np.ndarray) else [ax_arr]
         )
 
-        for i, (channel, cm) in enumerate(cm_channels.items()):
+        for i, (ch, cm) in enumerate(cm_channels.items()):
             ax = ax_list[i]
             sns.heatmap(
                 cm,
                 annot=True,
-                fmt=".3f",
+                fmt=".0f",
                 cmap="Blues",
+                cbar=False,
                 xticklabels=self.best_labels,
                 yticklabels=self.best_labels,
                 ax=ax,
             )
             ax.set_xlabel("Predicted")
             ax.set_ylabel("True")
-            model_name = self._get_model_name(self.channels_models[channel]["model"])
-            ax.set_title(f"{channel} ({model_name}) Confusion Matrix")
+            model_name = self._get_model_name(self.channels_models[ch]["model"])
+            ax.set_title(f"{ch} ({model_name})")
 
-        # hide unused axes
+        # hide unused axes (if any)
         for j in range(len(cm_channels), len(ax_list)):
             fig.delaxes(ax_list[j])
 
         plt.tight_layout()
-        plt.savefig(f"{self.run_directory}/channel_confusion_matrices.png", dpi=300)
+        out_png = os.path.join(self.run_directory, "channel_confusion_matrices.png")
+        plt.savefig(out_png, dpi=300)
         plt.close()
 
+        print_log(self, f"Saved confusion matrices → {out_png}")
+
+    # ---------------------------------------------------------------------------
+    #   Robust to both LOSO / LMOSO (session tags) and k‑fold (foldX tags)
+    # ---------------------------------------------------------------------------
+    # ---------------------------------------------------------------------------
+    #   Robust to LOSO  /  LMOSO  /  k‑fold – finds only complete folds
+    # ---------------------------------------------------------------------------
     def plot_per_sample_agreement(self):
         """
-        Plot per-sample agreement across channels.
-        Shows which samples all channels agree on and which have disagreement.
+        Visualise per‑sample inter‑channel agreement.
+        Works for LOSO, LMOSO and stratified k‑fold without guessing file names.
         """
         if not hasattr(self, "evaluation_results"):
+            print_log(self, "Run the evaluation first.")
+            return
+
+        print_log(self, "---- PLOTTING PER‑SAMPLE AGREEMENT ----")
+
+        channels = list(self.channels_models.keys())
+
+        # ------------------------------------------------------------
+        # 1)  Discover tags that exist for *all* channels
+        # ------------------------------------------------------------
+        tags_per_channel = []
+        for ch in channels:
+            ch_tags = {
+                fn[len(ch) + 1 : -11]  # strip  "<ch>_" … "_preds.json"
+                for fn in os.listdir(self.fold_predictions_dir)
+                if fn.startswith(f"{ch}_") and fn.endswith("_preds.json")
+            }
+            tags_per_channel.append(ch_tags)
+
+        common_tags = sorted(set.intersection(*tags_per_channel))
+        if not common_tags:
             print_log(
-                self, "No evaluation results available. Run run_loso_evaluation first."
+                self,
+                "No common prediction files across all channels – "
+                "cannot compute agreement.",
             )
             return
 
-        print_log(self, "---- PLOTTING PER-SAMPLE AGREEMENT ----")
+        # ------------------------------------------------------------
+        # 2)  Load predictions   (only complete folds are used)
+        # ------------------------------------------------------------
+        sample_rows = []
+        for tag in common_tags:
+            fold_preds, fold_true = {}, None
 
-        # Get all sessions
-        ref_channel = next(iter(self.channel_data.keys()))
-        all_sessions = np.unique(self.channel_data[ref_channel]["session"])
+            for ch in channels:
+                path = os.path.join(self.fold_predictions_dir, f"{ch}_{tag}_preds.json")
+                with open(path, "r") as f:
+                    pdict = json.load(f)
 
-        # Prepare data for heatmap
-        sample_data = []
-
-        # For each session (fold)
-        for test_session in all_sessions:
-            # Load predictions for each channel
-            fold_preds = {}
-            fold_true = None
-
-            for channel in self.channels_models:
-                pred_file = (
-                    f"{self.fold_predictions_dir}/{channel}_{test_session}_preds.json"
-                )
-
-                if not os.path.exists(pred_file):
-                    print_log(
-                        self,
-                        f"Warning: Prediction file {pred_file} not found. Skipping.",
-                    )
-                    continue
-
-                with open(pred_file, "r") as f:
-                    pred_data = json.load(f)
-
-                # Get true and predicted labels
                 if fold_true is None:
-                    fold_true = np.array(pred_data["y_true"])
+                    fold_true = np.asarray(pdict["y_true"])
 
-                fold_preds[channel] = np.array(pred_data["y_pred"])
+                fold_preds[ch] = np.asarray(pdict["y_pred"])
 
-            # For each sample in this fold
             for i in range(len(fold_true)):
-                sample_row = {
-                    "session": test_session,
+                row = {
+                    "fold_tag": tag,
                     "true_label": fold_true[i],
-                    "sample_idx": i,
+                    "idx_in_fold": i,
                 }
+                for ch in channels:
+                    row[f"{ch}_pred"] = fold_preds[ch][i]
+                sample_rows.append(row)
 
-                # Get predictions from each channel
-                for channel in fold_preds:
-                    sample_row[f"{channel}_pred"] = fold_preds[channel][i]
-
-                # Count correct and agreement
-                correct_count = sum(
-                    1
-                    for channel in fold_preds
-                    if fold_preds[channel][i] == fold_true[i]
-                )
-
-                # Check if all channels predict the same (agreement)
-                unique_preds = set(fold_preds[channel][i] for channel in fold_preds)
-                agreement = len(unique_preds) == 1
-
-                sample_row["correct_count"] = correct_count
-                sample_row["total_channels"] = len(fold_preds)
-                sample_row["agreement"] = agreement
-                sample_row["agreement_label"] = (
-                    next(iter(unique_preds)) if agreement else "mixed"
-                )
-
-                sample_data.append(sample_row)
-
-        # Convert to DataFrame
-        samples_df = pd.DataFrame(sample_data)
-
-        # Save to CSV for detailed analysis
+        # ------------------------------------------------------------
+        # 3)  Data‑frame + statistics
+        # ------------------------------------------------------------
+        samples_df = pd.DataFrame(sample_rows)
         samples_df.to_csv(f"{self.run_directory}/per_sample_agreement.csv", index=False)
 
-        # Create heatmap for visualization
-        # Reshape data for heatmap: samples vs. channels with correct/incorrect predictions
-        channels = list(self.channels_models.keys())
+        pred_cols = [f"{ch}_pred" for ch in channels]
+        samples_df["agreement"] = samples_df[pred_cols].nunique(axis=1) == 1
+        samples_df["correct_cnt"] = (
+            samples_df[pred_cols].eq(samples_df["true_label"], axis=0).sum(axis=1)
+        )
 
-        agreement_counts = samples_df["agreement"].value_counts()
-        agreement_percent = (agreement_counts.get(True, 0) / len(samples_df)) * 100
+        agree_pct = samples_df["agreement"].mean() * 100
+        self.agg_perc = agree_pct  # used later in the final report
 
-        correct_by_channel = {}
-        for channel in channels:
-            mask = samples_df[f"{channel}_pred"] == samples_df["true_label"]
-            correct_by_channel[channel] = mask.mean() * 100
+        ch_acc = {
+            ch: (samples_df[f"{ch}_pred"] == samples_df["true_label"]).mean() * 100
+            for ch in channels
+        }
 
-        # Plot agreement statistics
+        # ------------------------------------------------------------
+        # 4)  Plots
+        # ------------------------------------------------------------
         plt.figure(figsize=(12, 6))
 
+        # Agreement / Disagreement
         plt.subplot(1, 2, 1)
         plt.bar(
             ["Agreement", "Disagreement"],
-            [agreement_counts.get(True, 0), agreement_counts.get(False, 0)],
+            [samples_df["agreement"].sum(), (~samples_df["agreement"]).sum()],
             color=["green", "red"],
         )
-        plt.title(f"Channel Agreement: {agreement_percent:.1f}% of samples")
-        plt.ylabel("Number of Samples")
+        plt.title(f"Channel agreement: {agree_pct:.1f}%")
+        plt.ylabel("# samples")
 
+        # Per‑channel accuracies
         plt.subplot(1, 2, 2)
-        plt.bar(channels, [correct_by_channel[ch] for ch in channels], color="skyblue")
-        plt.title("Accuracy by Channel")
+        plt.bar(channels, [ch_acc[ch] for ch in channels], color="skyblue")
         plt.ylabel("Accuracy (%)")
+        plt.title("Per‑channel accuracy")
         plt.xticks(rotation=45)
 
         plt.tight_layout()
-        plt.savefig(f"{self.run_directory}/channel_agreement_stats.png", dpi=300)
+        out_png = os.path.join(self.run_directory, "channel_agreement_stats.png")
+        plt.savefig(out_png, dpi=300)
         plt.close()
 
-        # For samples with disagreement, visualize which channels got it right
-        disagreement_samples = samples_df[~samples_df["agreement"]].copy()
-
-        if len(disagreement_samples) > 0:
-            # Limit to 100 samples for visualization clarity
-            if len(disagreement_samples) > 100:
-                disagreement_samples = disagreement_samples.sample(
-                    100, random_state=self.random_state
-                )
-
-            # Create heatmap data
-            heatmap_data = np.zeros((len(disagreement_samples), len(channels)))
-
-            for i, (_, row) in enumerate(disagreement_samples.iterrows()):
-                for j, channel in enumerate(channels):
-                    # 1 if correct, 0 if incorrect
-                    heatmap_data[i, j] = int(
-                        row[f"{channel}_pred"] == row["true_label"]
-                    )
-
-            plt.figure(figsize=(10, max(8, len(disagreement_samples) * 0.2)))
-            sns.heatmap(
-                heatmap_data,
-                cmap=["red", "green"],
-                cbar=False,
-                xticklabels=channels,
-                yticklabels=False,
-            )
-            plt.title("Channels Correctness on Disagreement Samples")
-            plt.xlabel("Channel")
-            plt.ylabel("Sample")
-            plt.tight_layout()
-            plt.savefig(
-                f"{self.run_directory}/disagreement_samples_heatmap.png", dpi=300
-            )
-            plt.close()
-        self.agg_perc = agreement_percent
+        print_log(self, f"Saved per‑sample agreement plot → {out_png}")
 
     def run_complete_analysis(self, n_iter=25):
         """
@@ -1501,7 +1475,7 @@ class SupremeTrainer:
         self.load_data()
 
         # Step 2: Run LOSO evaluation
-        evaluation_results = self.run_loso_evaluation(n_iter=n_iter)
+        evaluation_results = self._run_outer_cv(n_iter=n_iter)
 
         # Step 3: Statistical evaluation
         permutation_results = self.permutation_test()
@@ -1577,9 +1551,12 @@ class SupremeTrainer:
 |------|--------------|-----------------|------------|
 """
 
-        for fold in evaluation_results["fold_results"]:
-            report += f"| {fold['fold']} | {fold['test_session']} | {fold['supreme_accuracy']:.4f} | {fold['supreme_f1']:.4f} |\n"
-
+        for fr in evaluation_results["fold_results"]:
+            tag = fr.get("held_out_tag", fr.get("test_session", "n/a"))
+            report += (
+                f"| {fr['fold']} | {tag} | "
+                f"{fr['supreme_accuracy']:.4f} | {fr['supreme_f1']:.4f} |\n"
+            )
         # Statistical significance section
         report += f"""
 ## Statistical Significance
@@ -1680,7 +1657,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--n_iter",
         type=int,
-        default=25,
+        default=10,
         help="Number of iterations for hyperparameter optimization (default: 25)",
     )
     parser.add_argument(
@@ -1717,10 +1694,10 @@ if __name__ == "__main__":
         #  more or less difficult to deal with.
         # Example default configuration
         channels_models = {
-            "o2_comBat": {"model": "rf", "accuracy": 0.718},
-            # "po4_comBat": {"model": "knn", "accuracy": 0.613},
-            "tp8_comBat": {"model": "rf", "accuracy": 0.682},
-            "oz_comBat": {"model": "knn", "accuracy": 0.621},
+            "o2_comBat": {"model": "rf", "accuracy": 0.6},
+            "po4_comBat": {"model": "knn", "accuracy": 0.55},
+            "tp8_comBat": {"model": "rf", "accuracy": 0.6},
+            "oz_comBat": {"model": "knn", "accuracy": 0.55},
         }
 
     # Create and run the supreme trainer
@@ -1734,6 +1711,7 @@ if __name__ == "__main__":
         permu_count=args.permu_count,
         data_path=args.data_path,
         random_state=args.random_state,
+        n_iter=args.n_iter,
     )
 
     # Run the complete analysis
