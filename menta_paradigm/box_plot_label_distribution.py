@@ -115,7 +115,7 @@ class DataVisualizer:
 
 # Example usage:
 if __name__ == "__main__":
-    features_file_dir = "data/merged_features/12_sessions_merge_1743795360/"
+    features_file_dir = "data/final_sets/all_channels_binary"
     multiple=False
     if multiple:
         for i in range (1, 5):
@@ -132,11 +132,11 @@ if __name__ == "__main__":
             )
             visualizer.run_all()
     else:
-        features_file = features_file_dir + f"session_classifier_7_sess_balanced.csv"
+        features_file = features_file_dir + f"/o2_comBat.csv"
         visualizer = DataVisualizer(
             features_file=features_file,
             # feature_ranking_file="data/merged_features/merge_run_1741541389/imagery_task_feature_ranking.csv",
-            feature_ranking_file=None,
+            feature_ranking_file= "ml_model_outputs/o2_comBat_loso_1.0k_run_1746011121/best_model_feature_importance.csv",
             # Set to None for dynamic ranking
             top_n_features=4,
             feature_output_file=f"top_features_box_plots/feature_distributions_{features_file.split('.csv')[0].split('/')[-1]}.png",

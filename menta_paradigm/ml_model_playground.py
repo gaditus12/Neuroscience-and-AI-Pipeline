@@ -26,6 +26,27 @@ from sklearn.neighbors import KNeighborsClassifier
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+
+# Figure clean look
+plt.style.use("ggplot")
+
+# Optional: customize global defaults if you want more control
+plt.rcParams.update({
+    "figure.figsize": (10, 5),          # Default figure size
+    "axes.edgecolor": "0.5",            # Axis color
+    "axes.grid": True,                  # Show grid
+    "grid.alpha": 0.4,                  # Grid transparency
+    "grid.linestyle": "--",             # Dashed grid lines
+    "axes.titlesize": 14,
+    "axes.labelsize": 12,
+    "legend.fontsize": 11,
+    "xtick.labelsize": 11,
+    "ytick.labelsize": 11,
+    "patch.force_edgecolor": True,      # Outline histogram bars
+    "patch.linewidth": 0.5,
+})
+
+
 import seaborn as sns
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.svm import SVC
@@ -104,7 +125,7 @@ class EEGAnalyzer:
         timestamp = int(time.time())
         self.run_directory = os.path.join(
             "ml_model_outputs",
-            f"{channel_normalization}_{cv_method}_{permu_count}_run_{timestamp}",
+            f"o&g-shuffle_{channel_normalization}_{cv_method}_{permu_count}_run_{timestamp}",
         )
         os.makedirs(self.run_directory, exist_ok=True)
         with open(f"{self.run_directory}/features_file.txt", "w") as f:
@@ -759,6 +780,9 @@ class EEGAnalyzer:
 
         return results
 
+
+
+
     def calculate_anova_importance(self, df):
         """
         Calculate feature importance using ANOVA F-value (univariate feature selection).
@@ -1287,6 +1311,33 @@ class EEGAnalyzer:
             marker=dict(size=8, line=dict(width=0.5, color="DarkSlateGrey"))
         )
 
+        # Activate if you want circles around labels
+        # label_groups = df_pca.groupby("label")
+        # for label, group in label_groups:
+        #     # Compute centroid
+        #     center_x = group["PC1"].mean()
+        #     center_y = group["PC2"].mean()
+        #
+        #     # Compute radius: std deviation or max distance from center
+        #     radius = (
+        #             ((group["PC1"] - center_x) ** 2 + (group["PC2"] - center_y) ** 2).mean() ** 0.5
+        #     )
+        #
+        #     # Generate circle
+        #     theta = np.linspace(0, 2 * np.pi, 100)
+        #     circle_x = center_x + radius * np.cos(theta)
+        #     circle_y = center_y + radius * np.sin(theta)
+        #
+        #     # Add to plot
+        #     fig_label.add_scatter(
+        #         x=circle_x,
+        #         y=circle_y,
+        #         mode="lines",
+        #         line=dict(dash="dash", width=1),
+        #         name=f"Circle: {label}",
+        #         showlegend=True,
+        #     )
+
         # Save
         output_file_label = f"{self.run_directory}/interactive_2d_pca_by_label_top{self.top_n_labels}_labels_top{self.n_features_to_select}_features_{self.cv_method}.html"
         fig_label.write_html(output_file_label)
@@ -1370,6 +1421,37 @@ class EEGAnalyzer:
         fig_label.update_traces(
             marker=dict(size=5, line=dict(width=0.5, color="DarkSlateGrey"))
         )
+
+        # Activate if you want the spheres around labels
+        # for label, group in df_pca_3d.groupby("label"):
+        #     # Center
+        #     cx = group["PC1"].mean()
+        #     cy = group["PC2"].mean()
+        #     cz = group["PC3"].mean()
+        #
+        #     # Radius (e.g. stddev-based)
+        #     radius = (
+        #             ((group["PC1"] - cx) ** 2 + (group["PC2"] - cy) ** 2 + (group["PC3"] - cz) ** 2).mean() ** 0.5
+        #     )
+        #
+        #     # Sphere coordinates
+        #     phi = np.linspace(0, np.pi, 15)
+        #     theta = np.linspace(0, 2 * np.pi, 30)
+        #     phi, theta = np.meshgrid(phi, theta)
+        #     x_sphere = cx + radius * np.sin(phi) * np.cos(theta)
+        #     y_sphere = cy + radius * np.sin(phi) * np.sin(theta)
+        #     z_sphere = cz + radius * np.cos(phi)
+        #     import plotly.graph_objects as go
+        #     fig_label.add_trace(go.Surface(
+        #         x=x_sphere,
+        #         y=y_sphere,
+        #         z=z_sphere,
+        #         opacity=0.2,
+        #         showscale=False,
+        #         name=f"Sphere: {label}",
+        #         hoverinfo='skip',
+        #         colorscale=[[0, 'lightgray'], [1, 'lightblue']]
+        #     ))
 
         # Save
         output_file_label = f"{self.run_directory}/interactive_3d_pca_by_label_top{self.top_n_labels}_labels_top{self.n_features_to_select}_features_{self.cv_method}.html"
@@ -1734,6 +1816,7 @@ class EEGAnalyzer:
             return
 
         df_best = self.df[self.df["label"].isin(self.best_labels)]
+
         X_best = df_best[self.feature_columns]
         y_best = df_best["label"]
 
@@ -1741,7 +1824,7 @@ class EEGAnalyzer:
         # [... keep the big search_spaces dict unchanged ...]
         search_spaces = (
             self._define_search_spaces()
-        )  # ← put your long dict into this helper
+        )
 
         # choose outer / inner splitters
         outer_cv, inner_cv_proto = self._get_nested_splitters(df_best["session"].values)
@@ -1752,7 +1835,8 @@ class EEGAnalyzer:
             search_spaces.items(), desc="Optimising (nested CV)"
         ):
             print_log(f"\n⟹  Optimising {model_name}")
-            outer_scores, fold_estimators, fold_sizes, outer_log = [], [], [], []
+            outer_scores, fold_estimators, fold_sizes, outer_log, fold_acc = [], [], [], [],[]
+            fold_true, fold_pred = [], []  # NEW
 
             # --- outer loop --------------------------------------------------
             outer_indices = outer_cv.split(
@@ -1789,6 +1873,8 @@ class EEGAnalyzer:
                 opt.fit(X_tr, y_tr)
 
                 y_pred = opt.predict(X_te)
+                fold_true.append(y_te.to_numpy())  # NEW
+                fold_pred.append(y_pred)  # NEW
                 outer_f1 = f1_score(y_te, y_pred, average="macro")
                 inner_best = opt.best_score_
 
@@ -1796,12 +1882,16 @@ class EEGAnalyzer:
                 fold_sizes.append(len(te_idx))
                 fold_estimators.append(opt.best_estimator_)
 
+                outer_acc = accuracy_score(y_te, y_pred)
+                fold_acc.append(outer_acc)  # inside the outer loop
+
                 outer_log.append(
                     {
                         "fold": fold,
                         "n_samples": len(te_idx),
                         "inner_best_f1": inner_best,
                         "outer_f1": outer_f1,
+                        "best_params": opt.best_params_,
                     }
                 )
                 print_log(
@@ -1817,6 +1907,9 @@ class EEGAnalyzer:
                 "outer_mean_f1": mu,
                 "outer_std_f1": sig,
                 "per_fold_f1": outer_scores,
+                "per_fold_acc": fold_acc,  # ← store it here
+                "per_fold_true": fold_true,  # NEW
+                "per_fold_pred": fold_pred,  # NEW
                 "best_fold_model": fold_estimators[int(np.argmax(outer_scores))],
             }
             all_results[model_name] = {
@@ -1864,11 +1957,11 @@ class EEGAnalyzer:
                     [RandomForestClassifier(random_state=42, n_jobs=-1)]
                 ),
                 "model__n_estimators": Integer(50, 150),  # fewer trees → less variance
-                "model__max_depth": Integer(2, 4),  # very shallow
-                "model__min_samples_split": Integer(2, 6),
+                "model__max_depth": Integer(2, 3),  # very shallow 2, 4
+                "model__min_samples_split": Integer(2, 6), # 2, 6
                 "model__min_samples_leaf": Integer(2, 8),  # prevents tiny leaves
                 "model__class_weight": Categorical(["balanced"]),
-                "feature_selection__k": Integer(3, 20),
+                "feature_selection__k": Integer(3, 20), #3, 20
             },
             # ──────────────────────────────────────────────────────────────   SVM  ──
             "SVM": {
@@ -2157,190 +2250,448 @@ class EEGAnalyzer:
     #   ❶  Violin / strip plot of LOSO (or k-fold) outer scores
     # ------------------------------------------------------------
     def plot_outer_fold_distribution(self):
-        """Draw violin/strip with μ±σ and null thresholds."""
-        if not hasattr(self, "optimization_results"):
-            print_log("Run optimise_hyperparameters first.")
+        """
+        Violin/strip plot of outer‑fold macro‑F1 with bootstrap CI and
+        (optionally) gold‑/OG‑null thresholds.
+
+        Works for both:
+            – self.optimization_results   (Bayes search route)
+            – self.fixed_cv_results       (heuristic‑HP route)
+        """
+        import os, numpy as np, matplotlib.pyplot as plt, seaborn as sns
+
+        # -----------------------------------------------------------------
+        # 1) detect which result container is present
+        # -----------------------------------------------------------------
+        if hasattr(self, "optimization_results"):
+            container = self.optimization_results
+            best_name = container["best_model_name"]
+            fold_scores = np.asarray(container["best_results"][best_name]["per_fold_f1"])
+        elif hasattr(self, "fixed_cv_results"):
+            best_name = self.fixed_best_model_name  # stored by run_nested_cv_fixed
+            fold_scores = np.asarray(self.fixed_cv_results[best_name]["per_fold_f1"])
+        else:
+            print_log("No outer‑CV results found – run nested CV first.")
             return
 
-        import matplotlib.pyplot as plt, seaborn as sns, numpy as np, os
-
-        import matplotlib.pyplot as plt, seaborn as sns, numpy as np, os
-
-        best_name = self.optimization_results["best_model_name"]
-        fold_scores = np.asarray(
-            self.optimization_results["best_results"][best_name]["per_fold_f1"]
-        )
+        # -----------------------------------------------------------------
+        # 2) basic statistics
+        # -----------------------------------------------------------------
         mean_s = fold_scores.mean()
         sd_s = fold_scores.std(ddof=0)
 
-        # ── NEW: vectorised bootstrap (5 000 resamples) ──────────────────────────
         rng = np.random.default_rng(42)
-        n_boot = 5_000
-        boot_means = rng.choice(
-            fold_scores, size=(n_boot, fold_scores.size), replace=True
-        ).mean(axis=1)
+        boot_means = rng.choice(fold_scores,
+                                size=(5000, fold_scores.size),
+                                replace=True).mean(axis=1)
         ci_low, ci_high = np.percentile(boot_means, [2.5, 97.5])
 
+        # -----------------------------------------------------------------
+        # 3) plot
+        # -----------------------------------------------------------------
         plt.figure(figsize=(5, 6))
         ax = plt.gca()
         sns.violinplot(data=fold_scores, inner=None, color="skyblue", ax=ax)
         sns.stripplot(data=fold_scores, color="black", size=6, jitter=False, ax=ax)
 
-        # mean and bootstrap CI
-        ax.axhline(
-            mean_s, ls="--", lw=2, color="red", label=f"μ={mean_s:.2f}±{sd_s:.2f}"
-        )
-        ax.axhspan(
-            ci_low,
-            ci_high,
-            color="red",
-            alpha=0.15,
-            label=f"95 % boot CI [{ci_low:.2f}, {ci_high:.2f}]",
-        )
+        ax.axhline(mean_s, ls="--", lw=2, color="red",
+                   label=f"μ={mean_s:.2f}±{sd_s:.2f}")
+        ax.axhspan(ci_low, ci_high, color="red", alpha=0.15,
+                   label=f"95 % boot CI [{ci_low:.2f}, {ci_high:.2f}]")
 
-        # reference lines from permutation test
-        null95_file = os.path.join(self.run_directory, "null_95th_percentile.npy")
-        null50_file = os.path.join(self.run_directory, "null_50th_percentile.npy")
-        if os.path.exists(null95_file):
-            crit95 = float(np.load(null95_file))
-            ax.axhline(
-                crit95, ls=":", lw=2, color="black", label=f"α = 0.05 ({crit95:.2f})"
-            )
-        crit50 = float(np.load(null50_file)) if os.path.exists(null50_file) else 0.50
-        ax.axhline(
-            crit50, ls="--", lw=1.5, color="grey", label=f"Null mean ({crit50:.2f})"
-        )
+        # optional null thresholds (OG or gold)
+        for tag, style in [("null_95th_percentile.npy", (":", "α=0.05")),
+                           ("gold_null95.npy", (":", "α=0.05 (gold)")),
+                           ("null_50th_percentile.npy", ("--", "Null mean")),
+                           ("gold_null50.npy", ("--", "Null mean (gold)"))]:
+            f = os.path.join(self.run_directory, tag)
+            if os.path.exists(f):
+                val = float(np.load(f))
+                ax.axhline(val, ls=style[0], lw=2,
+                           color="black" if ':' in style[0] else "grey",
+                           label=f"{style[1]} ({val:.2f})")
 
-        ax.set_ylabel("Macro-F1 (outer fold)")
-        ax.set_title(
-            f"{best_name} – distribution across {fold_scores.size} outer folds"
-        )
+        ax.set_ylabel("Macro‑F1 (outer fold)")
+        ax.set_title(f"{best_name} – distribution across {fold_scores.size} outer folds")
         ax.set_ylim(0, 1)
         ax.legend()
-        out_file = f"{self.run_directory}/outer_fold_f1_distribution.png"
-        plt.tight_layout()
-        plt.savefig(out_file, dpi=300, bbox_inches="tight")
+        out_png = f"{self.run_directory}/outer_fold_f1_distribution.png"
+        plt.tight_layout();
+        plt.savefig(out_png, dpi=300, bbox_inches="tight");
         plt.close()
-        print_log(f"Saved violin plot → {out_file}")
+        print_log(f"Saved violin plot → {out_png}")
+
+    # NESTED CV without Bayes
+    def run_nested_cv_fixed(self, models=None):
+        """
+        Nested CV **without** hyper‑parameter search.
+        Uses exactly the same outer/inner splitters that
+        `_get_nested_splitters` would give, but the inner loop is
+        only there to keep the feature‑selection / scaling strictly
+        train‑only – no optimisation is performed.
+
+        After running, the per‑model outer‑fold predictions are stored in
+        `self.fixed_cv_results` and the winning pipeline (re‑fitted on *all*
+        data) in `self.fixed_best_model`.
+        """
+        from sklearn.base import clone
+        from collections import defaultdict
+        if self.best_labels is None:
+            raise RuntimeError("call evaluate_label_combinations() first")
+
+        # ❶  Data restricted to the best label combo
+        df_best = self.df[self.df["label"].isin(self.best_labels)].reset_index(drop=True)
+        X_all = df_best[self.feature_columns]
+        y_all = df_best["label"]
+        groups_all = df_best["session"].values
+
+        # ❷  Default model dict (same heuristics you already use)
+        if models is None:
+            # ── Heuristic‑HP models (no tuning) ─────────────────────────────
+            self.heuristic_models = {
+                # 1) Random Forest – very small, shallow, balanced
+                "RandomForest": RandomForestClassifier(
+                    n_estimators=80,  # enough trees for stability, not overkill
+                    max_depth=3,  # shallow → less over‑fitting on 118 samples
+                    min_samples_split=2,
+                    min_samples_leaf=2,  # avoid single‑sample leaves
+                    class_weight="balanced",
+                    random_state=42,
+                    n_jobs=-1,
+                ),
+
+                # 2) SVM – RBF kernel with mild regularisation
+                "SVM": SVC(
+                    kernel="rbf",
+                    C=0.8,  # soft margin
+                    gamma="scale",  # 1 / (n_features × Var) – works fine here
+                    probability=True,
+                    class_weight="balanced",
+                    random_state=42,
+                ),
+
+                # 3) Elastic‑Net Logistic Regression
+                "ElasticNetLogReg": LogisticRegression(
+                    penalty="elasticnet",
+                    C=1.0,  # ≈ default strength
+                    l1_ratio=0.5,  # 50‑50 L1/L2 mix
+                    solver="saga",
+                    max_iter=4000,
+                    class_weight="balanced",
+                    random_state=42,
+                ),
+
+                # 4) Extra‑Trees – slightly deeper than RF but still conservative
+                "ExtraTrees": ExtraTreesClassifier(
+                    n_estimators=120,
+                    max_depth=4,
+                    min_samples_leaf=2,
+                    class_weight="balanced",
+                    random_state=42,
+                    n_jobs=-1,
+                ),
+
+                # 5) HistGradientBoosting – fast, regularised
+                "HGBClassifier": HistGradientBoostingClassifier(
+                    learning_rate=0.05,
+                    max_depth=3,
+                    max_iter=80,
+                    class_weight="balanced",
+                    random_state=42,
+                ),
+
+                # 6) k‑Nearest Neighbours – distance weighting, odd k
+                "kNN": KNeighborsClassifier(
+                    n_neighbors=7,
+                    weights="distance",
+                ),
+
+                # 7) Gaussian Naïve Bayes – no params to tweak
+                "GaussianNB": GaussianNB(),
+
+                # 8) Shrinkage LDA – automatic shrinkage
+                "ShrinkageLDA": LinearDiscriminantAnalysis(
+                    solver="lsqr",
+                    shrinkage="auto",
+                ),
+            }
+
+        outer_cv, _ = self._get_nested_splitters(groups_all)
+        results = {}
+
+        print_log("\n---- FIXED‑PARAM NESTED CV ----")
+        for name, base_model in self.heuristic_models.items():
+            fold_true, fold_pred, fold_f1, fold_acc = [],[], [], []
+            print_log(f"\n{name}")
+            for fold, (tr_idx, te_idx) in enumerate(
+                    outer_cv.split(X_all, y_all, groups_all), start=1):
+                X_tr, X_te = X_all.iloc[tr_idx], X_all.iloc[te_idx]
+                y_tr, y_te = y_all.iloc[tr_idx], y_all.iloc[te_idx]
+
+                # ── scale & select inside the outer fold ──────────────────
+                scaler = StandardScaler().fit(X_tr)
+                X_tr_s = scaler.transform(X_tr)
+                X_te_s = scaler.transform(X_te)
+
+                selector = SelectKBest(f_classif, k=self.n_features_to_select).fit(
+                    X_tr_s, y_tr)
+                X_tr_sel = selector.transform(X_tr_s)
+                X_te_sel = selector.transform(X_te_s)
+
+                clf = clone(base_model).fit(X_tr_sel, y_tr)
+                y_hat = clf.predict(X_te_sel)
+
+                acc_val = accuracy_score(y_te, y_hat)
+                fold_acc.append(acc_val)  # store
+
+                fold_true.append(y_te.to_numpy())
+                fold_pred.append(y_hat)
+                f1_val = f1_score(y_te, y_hat, average="macro")
+                fold_f1.append(f1_val)
+                print_log(f"  outer‑fold {fold}: F1={f1_val:.3f}")
+
+            mu = np.mean(fold_f1)
+            sig = np.std(fold_f1, ddof=0)
+            print_log(f"→ mean outer F1 = {mu:.3f} ± {sig:.3f}")
+
+            results[name] = dict(
+                per_fold_true=fold_true,
+                per_fold_pred=fold_pred,
+                per_fold_f1=fold_f1,
+                per_fold_acc=fold_acc,  # new
+                mean_f1=mu,
+                mean_acc=np.mean(fold_acc)
+            )
+
+        # store & pick the winner
+        self.fixed_cv_results = results
+        self.fixed_best_model_name = max(results, key=lambda k: results[k]["mean_f1"])
+
+        # ❸  re‑fit winner on the FULL data (still scaling + selection)
+        best_base = self.heuristic_models[self.fixed_best_model_name]
+        scaler = StandardScaler().fit(X_all)
+        X_all_s = scaler.transform(X_all)
+        selector = SelectKBest(f_classif, k=self.n_features_to_select).fit(X_all_s, y_all)
+        X_all_sel = selector.transform(X_all_s)
+
+        self.fixed_best_model = clone(best_base).fit(X_all_sel, y_all)
+
+        print_log(f"\nWinner (fixed‑param): {self.fixed_best_model_name} "
+                  f"with mean F1 = {results[self.fixed_best_model_name]['mean_f1']:.3f}")
 
     # ------------------------------------------------------------
-    #   ❷  Permutation test (label shuffle)
+    #  Permutation test – label‑shuffle on fixed CV predictions
     # ------------------------------------------------------------
+    def permutation_test_best_model(self,
+                                    n_perm: int = 1_000,
+                                    random_state: int = 42):
+        """
+        Ojala‑Garriga label‑shuffle test
+        (predictions are fixed; only labels are permuted).
 
-    # ---------------------------------------------------------------------
-    #  Permutation test – now saves 95‑th *and* 50‑th percentile
-    # ---------------------------------------------------------------------
-    def permutation_test_best_model(self, n_perm: int = 1_000, random_state: int = 42):
-        """Label‑shuffle test; saves null 95th & 50th percentiles for overlays."""
-        n_perm = self.permu_count
+        Saves the 95‑th and 50‑th percentiles for violin‑plot overlays.
+        """
+        n_perm = self.permu_count  # honour CLI value
         if not hasattr(self, "optimization_results"):
             print_log("Run optimise_hyperparameters first.")
             return
+
         import numpy as np
-
-        rng = np.random.default_rng(random_state)
-        best_pipe = self.optimization_results["best_model"]
-        best_name = self.optimization_results["best_model_name"]
-
-        df_best = self.df[self.df["label"].isin(self.best_labels)]
-        X = df_best[self.feature_columns].values
-        y = df_best["label"].values
-        groups = (
-            df_best["session"].values
-            if self.cv_method in {"loso", "lmoso"}  # ← include the new protocol
-            else None
-        )
-        if self.cv_method == "loso":
-            outer_splitter = LeaveOneGroupOut()
-            split_iter = outer_splitter.split(X, y, groups)
-        elif self.cv_method == "lmoso":
-            outer_splitter = LeavePGroupsOut(self.lmoso_leftout)
-            split_iter = outer_splitter.split(X, y, groups)
-        else:
-            outer_splitter = StratifiedKFold(
-                n_splits=self.kfold_splits, shuffle=True, random_state=123
-            )
-            split_iter = outer_splitter.split(X, y)
-
         from sklearn.metrics import f1_score, accuracy_score
+        rng = np.random.default_rng(random_state)
 
-        obs_f1, obs_acc = [], []
+        best_name = self.optimization_results["best_model_name"]
+        fold_f1 = np.asarray(self.optimization_results["best_results"]
+                             [best_name]["per_fold_f1"])
+        fold_acc = np.asarray(self.optimization_results["best_results"]
+                              [best_name]["per_fold_acc"])
+        per_fold_true = self.optimization_results["best_results"] \
+            [best_name]["per_fold_true"]
+        per_fold_pred = self.optimization_results["best_results"] \
+            [best_name]["per_fold_pred"]
 
-        # ---------- observed outer-fold scores ----------
-        for tr, te in split_iter:
-            best_pipe.fit(X[tr], y[tr])
-            y_pred = best_pipe.predict(X[te])
-            obs_f1.append(f1_score(y[te], y_pred, average="macro"))
-            obs_acc.append(accuracy_score(y[te], y_pred))
-        obs_mean_f1 = float(np.mean(obs_f1))
-        obs_mean_acc = float(np.mean(obs_acc))
+        # ---------- observed statistic (mean of per‑fold scores) ----------
+        obs_mean_f1 = float(fold_f1.mean())
+        obs_mean_acc = float(fold_acc.mean())
         print_log(f"Observed μ F1 = {obs_mean_f1:.3f} | μ ACC = {obs_mean_acc:.3f}")
+
+        # ---------- build null distribution ------------------------------
+        # concat once for easier shuffling
+        y_true_all = np.concatenate(per_fold_true)
+        y_pred_all = np.concatenate(per_fold_pred)
+        fold_sizes = [len(t) for t in per_fold_true]
 
         null_mean_f1 = np.empty(n_perm)
         null_mean_acc = np.empty(n_perm)
 
-        for i in tqdm(range(n_perm), desc="Permutations"):
-            y_perm = rng.permutation(y)
-            fold_f1, fold_acc = [], []
-            for tr, te in (
-                outer_splitter.split(X, y_perm, groups)
-                if groups is not None
-                else outer_splitter.split(X, y_perm)
-            ):
-                best_pipe.fit(X[tr], y_perm[tr])
-                y_hat = best_pipe.predict(X[te])
-                fold_f1.append(f1_score(y_perm[te], y_hat, average="macro"))
-                fold_acc.append(accuracy_score(y_perm[te], y_hat))
-            null_mean_f1[i] = np.mean(fold_f1)
-            null_mean_acc[i] = np.mean(fold_acc)
+        for i in tqdm( range(n_perm), desc='Running Permutations'):
+            y_perm = rng.permutation(y_true_all)  # shuffle labels
+            start = 0
+            f1_list, acc_list = [], []
+            for n in fold_sizes:  # slice back into folds
+                ys = y_perm[start:start + n]
+                ps = y_pred_all[start:start + n]
+                f1_list.append(f1_score(ys, ps, average="macro"))
+                acc_list.append(accuracy_score(ys, ps))
+                start += n
+            null_mean_f1[i] = np.mean(f1_list)
+            null_mean_acc[i] = np.mean(acc_list)
 
+        # ---------- p‑values & critical values ----------------------------
         p_f1 = (np.sum(null_mean_f1 >= obs_mean_f1) + 1) / (n_perm + 1)
         p_acc = (np.sum(null_mean_acc >= obs_mean_acc) + 1) / (n_perm + 1)
-        crit95_f1 = float(np.percentile(null_mean_f1, 95))
-        crit95_acc = float(np.percentile(null_mean_acc, 95))
-        crit50_f1 = float(np.percentile(null_mean_f1, 50))
-        crit50_acc = float(np.percentile(null_mean_acc, 50))
-        print_log(f"Permutation p-values →  F1: {p_f1:.4f} | ACC: {p_acc:.4f}")
 
-        # keep F1 thresholds for the violin plot
-        np.save(os.path.join(self.run_directory, "null_95th_percentile.npy"), crit95_f1)
-        np.save(os.path.join(self.run_directory, "null_50th_percentile.npy"), crit50_f1)
+        crit95_f1, crit50_f1 = np.percentile(null_mean_f1, [95, 50]).astype(float)
+        crit95_acc, crit50_acc = np.percentile(null_mean_acc, [95, 50]).astype(float)
 
-        # ------------- side-by-side histogram -----------------
+        print_log(f"Permutation p‑values →  F1: {p_f1:.4f} | ACC: {p_acc:.4f}")
+
+        # ---------- save thresholds for violin plot -----------------------
+        np.save(os.path.join(self.run_directory, "null_95th_percentile.npy"),
+                crit95_f1)
+        np.save(os.path.join(self.run_directory, "null_50th_percentile.npy"),
+                crit50_f1)
+
+        # ---------- histogram figure --------------------------------------
+        import matplotlib.pyplot as plt
         fig, ax = plt.subplots(1, 2, figsize=(12, 4), sharey=True)
 
-        ax[0].hist(null_mean_f1, bins=30, alpha=0.7)
+        ax[0].hist(null_mean_f1, 30, alpha=.7)
         ax[0].axvline(obs_mean_f1, color="red", lw=2, label=f"Obs {obs_mean_f1:.3f}")
-        ax[0].axvline(crit95_f1, color="black", ls=":", lw=2, label=f"95 % null")
-        ax[0].axvline(crit50_f1, color="grey", ls=":", lw=2, label="Mean F1")
-        ax[0].set_title(f"Macro-F1 null distribution\np={p_f1:.4f}")
-        ax[0].set_xlabel("Mean F1")
-        ax[0].set_ylabel("Count")
+        ax[0].axvline(crit95_f1, color="black", ls=":", lw=2, label="95 % null")
+        ax[0].axvline(crit50_f1, color="grey", ls=":", lw=2, label="Null mean")
+        ax[0].set(title=f"Macro‑F1 null distribution\np={p_f1:.4f}",
+                  xlabel="Mean F1", ylabel="Count")
         ax[0].legend()
 
-        ax[1].hist(null_mean_acc, bins=30, alpha=0.7, color="mediumaquamarine")
+        ax[1].hist(null_mean_acc, 30, alpha=.7, color="mediumaquamarine")
         ax[1].axvline(obs_mean_acc, color="red", lw=2, label=f"Obs {obs_mean_acc:.3f}")
-        ax[1].axvline(
-            crit95_acc,
-            color="black",
-            ls=":",
-            lw=2,
-            label="Significance Threshold (α=0.05)",
-        )
-        ax[1].axvline(crit50_acc, color="grey", ls=":", lw=2, label="Mean Accuracy")
-        ax[1].set_title(f"Accuracy null distribution\np={p_f1:.4f}")
-        ax[1].set_xlabel("Mean Accuracy")
+        ax[1].axvline(crit95_acc, color="black", ls=":", lw=2, label="95 % null")
+        ax[1].axvline(crit50_acc, color="grey", ls=":", lw=2, label="Null mean")
+        ax[1].set(title=f"Accuracy null distribution\np={p_acc:.4f}",
+                  xlabel="Mean Accuracy")
         ax[1].legend()
 
-        fig.suptitle(f"Permutation test – {best_name}  ({n_perm} permutations)", y=1.03)
-        out_file = f"{self.run_directory}/permutation_histogram_{best_name}.png"
+        fig.suptitle(f"Permutation test – {best_name} ({n_perm} permutations)")
+        out_png = f"{self.run_directory}/permutation_histogram_{best_name}.png"
         fig.tight_layout()
-        fig.savefig(out_file, dpi=300, bbox_inches="tight")
+        fig.savefig(out_png, dpi=300)
         plt.close()
-        print_log(f"Saved permutation histogram → {out_file}")
+        print_log(f"Saved permutation histogram → {out_png}")
 
         self.permutation_p_value = {"f1": p_f1, "accuracy": p_acc}
         return self.permutation_p_value, crit95_f1, crit50_f1
+
+    # ──────────────────────────────────────────────────────────────────────────────
+    #  GOLD‑STANDARD PERMUTATION TEST  (full re‑training for every shuffle)
+    # ──────────────────────────────────────────────────────────────────────────────
+    def permutation_test_gold(self,
+                              n_perm: int = 1000,
+                              random_state: int = 42):
+        """
+        Fully re‑trains the **winning fixed‑hyper‑param pipeline**
+        on *every* label shuffle → unbiased null distribution.
+
+        • Requires that `run_nested_cv_fixed()` has been executed first
+          (it decides the “winning” pipeline + stores heuristic models).
+
+        Returns
+        -------
+        dict  with p‑values and percentile thresholds.
+        """
+        n_perm=self.permu_count
+        if not hasattr(self, "fixed_cv_results"):
+            raise RuntimeError("Call run_nested_cv_fixed() before the gold permutation test")
+
+        import numpy as np, matplotlib.pyplot as plt, os
+        from tqdm import trange
+        from sklearn.base import clone
+        from sklearn.metrics import f1_score, accuracy_score
+
+        rng = np.random.default_rng(random_state)
+
+        # ----- data restricted to best‑label pair/triplet --------------------------
+        df_best = self.df[self.df["label"].isin(self.best_labels)].reset_index(drop=True)
+        X_all = df_best[self.feature_columns]
+        y_orig = df_best["label"].to_numpy()
+        groups = df_best["session"].values
+
+        outer_cv, _ = self._get_nested_splitters(groups)
+
+        # ----- use the SAME base model that won in run_nested_cv_fixed -------------
+        base_model_name = self.fixed_best_model_name
+        base_model_dict = {base_model_name:
+                               self.fixed_cv_results[base_model_name]
+                           }  # only need the name for printing
+        # you still have the original model object:
+        heuristic_models = self.heuristic_models
+        base_model = heuristic_models[base_model_name]
+
+        # ----- observed statistic (already computed) ------------------------------
+        obs_f1 = self.fixed_cv_results[base_model_name]["mean_f1"]
+
+        # containers
+        null_mean_f1 = np.empty(n_perm)
+        null_mean_acc = np.empty(n_perm)
+
+        print_log(f"\n---- GOLD permutation test ({n_perm} shuffles) "
+                  f"– evaluating {base_model_name} ----")
+
+        for p in trange(n_perm, desc="Permutations"):
+            y_perm = rng.permutation(y_orig)  # shuffle labels **before** CV
+            f1_per_fold, acc_per_fold = [], []
+
+            for tr_idx, te_idx in outer_cv.split(X_all, y_perm, groups):
+                # split the *permuted* labels exactly like the original CV
+                X_tr, X_te = X_all.iloc[tr_idx], X_all.iloc[te_idx]
+                y_tr, y_te = y_perm[tr_idx], y_perm[te_idx]
+
+                # ----- identical preprocessing as in run_nested_cv_fixed ----------
+                scaler = StandardScaler().fit(X_tr)
+                X_tr_s = scaler.transform(X_tr)
+                X_te_s = scaler.transform(X_te)
+
+                selector = SelectKBest(f_classif, k=self.n_features_to_select).fit(
+                    X_tr_s, y_tr)
+                X_tr_sel = selector.transform(X_tr_s)
+                X_te_sel = selector.transform(X_te_s)
+
+                mdl = clone(base_model).fit(X_tr_sel, y_tr)
+                y_hat = mdl.predict(X_te_sel)
+
+                f1_per_fold.append(f1_score(y_te, y_hat, average="macro"))
+                acc_per_fold.append(accuracy_score(y_te, y_hat))
+
+            null_mean_f1[p] = np.mean(f1_per_fold)
+            null_mean_acc[p] = np.mean(acc_per_fold)
+
+        # ----- p‑values -----------------------------------------------------------
+        obs_acc = self.fixed_cv_results[base_model_name]["mean_acc"]
+        p_f1 = (np.sum(null_mean_f1 >= obs_f1) + 1) / (n_perm + 1)
+        p_acc = (np.sum(null_mean_acc >= obs_acc) + 1) / (n_perm + 1)
+
+        crit95_f1 = float(np.percentile(null_mean_f1, 95))
+        crit50_f1 = float(np.percentile(null_mean_f1, 50))
+
+        # save thresholds for overlay plots if you like
+        np.save(os.path.join(self.run_directory, "gold_null95.npy"), crit95_f1)
+        np.save(os.path.join(self.run_directory, "gold_null50.npy"), crit50_f1)
+
+        # ----- histogram figure ---------------------------------------------------
+        fig, ax = plt.subplots(figsize=(6, 4))
+        ax.hist(null_mean_f1, 30, alpha=.7, label="null μ‑F1")
+        ax.axvline(obs_f1, color="red", lw=2, label=f"observed {obs_f1:.3f}")
+        ax.axvline(crit95_f1, color="black", ls=":", lw=2, label="95 % null")
+        ax.set(title=f"Gold permutation – {base_model_name}\n"
+                     f"p={p_f1:.4f}", xlabel="mean outer‑fold F1", ylabel="count")
+        ax.legend()
+        out_png = f"{self.run_directory}/gold_permutation_hist_{base_model_name}.png"
+        fig.tight_layout()
+        fig.savefig(out_png, dpi=300)
+        plt.close()
+        print_log(f"Saved gold permutation histogram → {out_png}")
+
+        return dict(p_f1=p_f1, p_acc=p_acc, crit95_f1=crit95_f1)
 
     def evaluate_best_model(self):
         """
@@ -2395,8 +2746,10 @@ class EEGAnalyzer:
         y_pred_all = []
         misclassified_samples = []
 
+        from sklearn.base import clone
         if self.cv_method in ["loo", "kfold", "loso", "lmoso"]:
             # Cross-validation approach (LOO or k-fold)
+
             for fold_idx, (train_idx, test_idx) in enumerate(
                 cv.split(X_best, y_best, groups=groups_eval)
                 if groups_eval is not None
@@ -2407,7 +2760,6 @@ class EEGAnalyzer:
                 test_indices = y_test.index.tolist()
 
                 # Clone the model for each fold to ensure independence
-                from sklearn.base import clone
 
                 model_clone = clone(best_model)
 
@@ -2556,33 +2908,39 @@ class EEGAnalyzer:
         self.load_data()
 
         # Modified calls to prevent info leaks
-        self.preprocess_data()  # Now just for exploration
-        self.feature_selection()  # Now just for informational purposes
+        # self.preprocess_data()  # Now just for exploration
+        # self.feature_selection()  # Now just for informational purposes
         self.evaluate_label_combinations()  # This method now handles proper CV and feature selection
 
-        # Optional hyperparameter optimization
+        # Main hyperparameter optimization (we simply always want to run with this option)
         if optimize_hyperparams:
             self.optimize_hyperparameters(n_iter=n_iter)
-            self.evaluate_best_model()
-
-        # Visualization and reporting can stay the same as they're for interpretation
-        self.visualize_confusion_matrix()
-        self.visualize_pca()
-        self.visualize_pca_3d()
-        self.visualize_feature_importance()
-        self.analyze_channel_distribution()
-        self.visualize_metrics_comparison()
-        self.export_results()
-
-        # ---------------------------------------------
-        #   extra sanity-checks / visual diagnostics
-        # ---------------------------------------------
-        if optimize_hyperparams:
+            self.evaluate_best_model() #already saves conf. matrx
             self.permutation_test_best_model(n_perm=1_000)
             self.plot_outer_fold_distribution()
-            self._visualize_optimization_results(
+            self._visualize_optimization_results( # feature importance saved with progress
                 self.optimization_results["all_results"]
             )
+
+            # TODO change these so they report the correct model
+            self.visualize_pca()
+            self.visualize_pca_3d()
+
+
+        else: # run nested-cv without bayesian with gold standard permuation
+            self.run_nested_cv_fixed()  # chooses the heuristic winner
+            self.permutation_test_gold(n_perm=1000)
+            self.plot_outer_fold_distribution()
+
+            self.visualize_confusion_matrix()
+            self.visualize_pca()
+            self.visualize_pca_3d()
+            self.visualize_feature_importance()
+            self.analyze_channel_distribution()
+            self.visualize_metrics_comparison()
+            self.export_results()
+
+
 
         print_log("\n---- ANALYSIS COMPLETE ----")
         print_log(f"Most separable label combination: {self.best_labels}")
@@ -2649,7 +3007,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--n_features",
         type=int,
-        default=10,
+        default=30,
         help="Number of top features to select (default: 8)",
     )
     parser.add_argument(
