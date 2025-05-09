@@ -101,6 +101,7 @@ class EEGAnalyzer:
         test_size=0.2,
         lmoso_leftout: int = 2,
         permu_count=1_000,
+        optimize=False
     ):  # For holdout validation
 
         # Configuration
@@ -116,6 +117,7 @@ class EEGAnalyzer:
         self.test_size = test_size
         self.permu_count = permu_count
         self.lmoso_leftout = lmoso_leftout
+
         to_k = lambda n: (
             f"{n / 1000:.1f}k".rstrip("0").rstrip(".") if n >= 1000 else str(n)
         )
@@ -123,14 +125,22 @@ class EEGAnalyzer:
         channel_normalization = features_file.split("/")[-1].split(".")[0]
         # Create a unique directory for this run
         timestamp = int(time.time())
-        self.run_directory = os.path.join(
-            "ml_model_outputs",
-            f"o&g-shuffle_{channel_normalization}_{cv_method}_{permu_count}_run_{timestamp}",
-        )
+
+        if not optimize:
+            self.run_directory = os.path.join(
+                "ml_model_outputs",
+                f"samp_weig_gold-shuffle_{channel_normalization}_{cv_method}_{permu_count}_run_{timestamp}",
+            )
+        if optimize:
+            self.run_directory = os.path.join(
+                "ml_model_outputs",
+                f"samp_weig_o&g-shuffle_{channel_normalization}_{cv_method}_{permu_count}_run_{timestamp}",
+            )
         os.makedirs(self.run_directory, exist_ok=True)
         with open(f"{self.run_directory}/features_file.txt", "w") as f:
             f.write(self.features_file)
 
+        self.heuristic_models=self._default_heuristic_models()
         # Initialize placeholders for later use
         self.df = None
         self.feature_columns = None
@@ -304,7 +314,7 @@ class EEGAnalyzer:
             #   inner: random 20 % of the *remaining* sessions
             inner = GroupShuffleSplit(n_splits=3, test_size=0.20, random_state=42)
         elif self.cv_method == "kfold":
-            outer = StratifiedGroupKFold(
+            outer = StratifiedKFold(
                 n_splits=self.kfold_splits, shuffle=True, random_state=42
             )
             inner = StratifiedGroupKFold(n_splits=3, shuffle=True, random_state=24)
@@ -905,6 +915,49 @@ class EEGAnalyzer:
         )
 
         return importance_df
+
+    # ---------------------------------------------------------------------
+    #  Helper: Ensemble importance is replaced with this class to be used in
+    #  gold nested cv
+    # ---------------------------------------------------------------------
+    class EnsembleFilter:
+        """
+        A drop-in replacement for SelectKBest that ranks features with the
+        calculate_ensemble_importance() routine you already have.
+        """
+
+        def __init__(self, k):
+            self.k = k
+            self.selected_idx_ = None  # indices in original feature order
+
+        def fit(self, X, y):
+            # X is numpy array here (after scaling); y is 1-d array / Series
+            # Build a tiny dataframe to re-use your existing functions
+            df_tmp = pd.DataFrame(X, columns=self.feature_names_)
+            df_tmp["label"] = y
+            df_tmp["channel"] = "dummy"
+            df_tmp["session"] = 0
+
+            anova = self.calculate_anova_importance(df_tmp)
+            mi = self.calculate_mutual_info_importance(df_tmp)
+            rf = self.calculate_random_forest_importance(df_tmp)
+
+            ens = self.calculate_ensemble_importance(anova, mi, rf)
+
+            top_feats = ens.head(self.k)["feature"].tolist()
+            self.selected_idx_ = [self.feature_names_.index(f) for f in top_feats]
+            return self
+
+        def transform(self, X):
+            if self.selected_idx_ is None:
+                raise RuntimeError("Call fit() first")
+            return X[:, self.selected_idx_]
+
+        # scikit-learn compatibility helpers
+        def get_support(self, indices=False):
+            mask = np.zeros(len(self.feature_names_), dtype=bool)
+            mask[self.selected_idx_] = True
+            return self.selected_idx_ if indices else mask
 
     def calculate_ensemble_importance(self, anova_df, mi_df, rf_df):
         """
@@ -2321,6 +2374,8 @@ class EEGAnalyzer:
         plt.close()
         print_log(f"Saved violin plot → {out_png}")
 
+
+
     # NESTED CV without Bayes
     def run_nested_cv_fixed(self, models=None):
         """
@@ -2479,6 +2534,270 @@ class EEGAnalyzer:
         print_log(f"\nWinner (fixed‑param): {self.fixed_best_model_name} "
                   f"with mean F1 = {results[self.fixed_best_model_name]['mean_f1']:.3f}")
 
+
+
+    # NESTED CV without Bayes
+    def run_true_nested_cv(self):
+        """
+        Two‑level nested CV (no hyper‑parameter search).
+
+        • Outer CV  = self.cv_method   (LOO, LOSO, LMOSO, k‑fold, …)
+        • Inner CV  = chooses the best model family for *this* outer split,
+                      but we also store outer‑fold predictions for every model
+                      so downstream code (permutation tests, etc.) works unchanged.
+        """
+        from sklearn.base import clone
+        import numpy as np
+        import pandas as pd, os
+        from sklearn.model_selection import (
+            LeaveOneOut, StratifiedKFold,
+            StratifiedGroupKFold, GroupShuffleSplit, LeavePGroupsOut,
+        )
+
+        # ─────────────────────────────────────────────────────────────────────
+        # ❶  Sanity checks & data subsets
+        # ─────────────────────────────────────────────────────────────────────
+        if self.best_labels is None:
+            raise RuntimeError("Call evaluate_label_combinations() first")
+
+        df_best = self.df[self.df["label"].isin(self.best_labels)].reset_index(drop=True)
+        X_all = df_best[self.feature_columns]
+        y_all = df_best["label"]
+        groups = df_best["session"].values
+
+        # ─────────────────────────────────────────────────────────────────────
+        # ❷  OUTER / INNER splitters
+        # ─────────────────────────────────────────────────────────────────────
+        if self.cv_method == "loo":
+            outer_cv = LeaveOneOut()
+            outer_iter = outer_cv.split(X_all, y_all)  # no groups
+            inner_proto = StratifiedKFold(
+                n_splits=min(3, len(X_all) - 1), shuffle=True, random_state=24)
+        else:
+            outer_cv, inner_proto = self._get_nested_splitters(groups)
+
+            # does the OUTER splitter need a `groups` array?
+            needs_groups_outer = isinstance(
+                outer_cv,
+                (StratifiedGroupKFold, GroupShuffleSplit, LeavePGroupsOut, LeaveOneGroupOut)
+            )
+
+            if needs_groups_outer:
+                outer_iter = outer_cv.split(X_all, y_all, groups)
+            else:
+                outer_iter = outer_cv.split(X_all, y_all)
+
+        # ─────────────────────────────────────────────────────────────────────
+        # ❸  Prepare containers for *every* model family
+        # ─────────────────────────────────────────────────────────────────────
+        if not hasattr(self, "heuristic_models"):
+            self.heuristic_models = self._default_heuristic_models()  # helper
+
+        results = {
+            m: dict(per_fold_true=[], per_fold_pred=[], per_fold_f1=[], per_fold_acc=[], per_fold_n=[])
+            for m in self.heuristic_models
+        }
+
+        fold_logs = []  # keeps the “winning model per outer fold” story
+
+        # ─────────────────────────────────────────────────────────────────────
+        # ❹  OUTER loop
+        # ─────────────────────────────────────────────────────────────────────
+        from collections import defaultdict
+
+        # cumulative feature → weighted-score (will be summed across folds)
+        feature_score_accumulator = defaultdict(float)
+
+        # to keep raw per-fold info (optional, nice to inspect)
+        per_fold_feature_tables = []
+
+        needs_groups_inner = isinstance(
+            inner_proto, (StratifiedGroupKFold, GroupShuffleSplit, LeavePGroupsOut)
+        )
+
+        for f, (tr_idx, te_idx) in enumerate(outer_iter, start=1):
+
+            X_tr, X_te = X_all.iloc[tr_idx], X_all.iloc[te_idx]
+            y_tr, y_te = y_all.iloc[tr_idx], y_all.iloc[te_idx]
+
+            # build inner splits *once* per outer fold
+            if needs_groups_inner:
+                inner_splits = list(inner_proto.split(X_tr, y_tr, groups[tr_idx]))
+            else:
+                inner_splits = list(inner_proto.split(X_tr, y_tr))
+
+            # -----------------------------------------------------------------
+            # 4.1  INNER loop –%score every model family
+            # -----------------------------------------------------------------
+            inner_mean_f1 = {}
+            for mdl_name, base_mdl in self.heuristic_models.items():
+                f1_inner = []
+                for in_tr, in_val in inner_splits:
+                    scaler = StandardScaler().fit(X_tr.iloc[in_tr])
+                    sel = SelectKBest(f_classif, k=self.n_features_to_select).fit(
+                        scaler.transform(X_tr.iloc[in_tr]), y_tr.iloc[in_tr])
+                    X_tr_sel = sel.transform(scaler.transform(X_tr.iloc[in_tr]))
+                    X_val_sel = sel.transform(scaler.transform(X_tr.iloc[in_val]))
+
+                    y_hat = clone(base_mdl).fit(X_tr_sel, y_tr.iloc[in_tr]).predict(X_val_sel)
+                    f1_inner.append(f1_score(y_tr.iloc[in_val], y_hat, average="macro"))
+
+                inner_mean_f1[mdl_name] = np.mean(f1_inner)
+
+            # pick the inner‑CV winner
+            best_name = max(inner_mean_f1, key=inner_mean_f1.get)
+            best_model = self.heuristic_models[best_name]
+
+            # -----------------------------------------------------------------
+            # 4.2  Re‑train EACH model on outer‑train, predict outer‑test
+            #      (so permutation tests can access their per‑fold predictions)
+            # -----------------------------------------------------------------
+            scaler_full = StandardScaler().fit(X_tr)
+            sel_full = SelectKBest(f_classif, k=self.n_features_to_select).fit(
+                scaler_full.transform(X_tr), y_tr)
+
+            X_tr_sel = sel_full.transform(scaler_full.transform(X_tr))
+            X_te_sel = sel_full.transform(scaler_full.transform(X_te))
+
+            for mdl_name, base_mdl in self.heuristic_models.items():
+                y_pred = clone(base_mdl).fit(X_tr_sel, y_tr).predict(X_te_sel)
+
+                results[mdl_name]["per_fold_true"].append(y_te.to_numpy())
+                results[mdl_name]["per_fold_pred"].append(y_pred)
+                results[mdl_name]["per_fold_f1"].append(
+                    f1_score(y_te, y_pred, average="macro")
+                )
+                results[mdl_name]["per_fold_acc"].append(
+                    accuracy_score(y_te, y_pred)
+                )
+                results[mdl_name]["per_fold_n"].append(len(te_idx))  # ← NEW
+
+            # --------------------------------------------------------------
+            #   ①  Get the selected feature names *in this fold*
+            # --------------------------------------------------------------
+            selected_idx = sel_full.get_support(indices=True)
+            selected_feats = [self.feature_columns[i] for i in selected_idx]
+
+            # --------------------------------------------------------------
+            #   ②  Extract importance scores for those features
+            # --------------------------------------------------------------
+            def _get_importances(model, X, y):
+                """Return an array of importance scores *aligned with selected_feats*"""
+                # tree-based models
+                if hasattr(model, "feature_importances_"):
+                    return model.feature_importances_
+                # linear models with coef_
+                if hasattr(model, "coef_"):
+                    return np.abs(model.coef_).ravel()
+                # fallback: permutation importance (quick, 5 repeats)
+                from sklearn.inspection import permutation_importance
+                pi = permutation_importance(model, X, y, n_repeats=5,
+                                            random_state=42, n_jobs=-1)
+                return pi.importances_mean
+
+            X_tr_fold_sel = X_tr_sel  # already created above
+            y_tr_fold = y_tr  # same alignment
+            importances = _get_importances(
+                clone(best_model).fit(X_tr_fold_sel, y_tr_fold),
+                X_tr_fold_sel, y_tr_fold)
+
+            # -----------------------------------------------------------------
+            # 4.3  bookkeeping
+            # -----------------------------------------------------------------
+            outer_f1 = results[best_name]["per_fold_f1"][-1]
+            print_log(f"Fold {f:02d}: best={best_name:<15}  "
+                      f"inner‑F1={inner_mean_f1[best_name]:.3f}  "
+                      f"outer‑F1={outer_f1:.3f}")
+            print_log(f"Fold {f:02d} label counts: {dict(pd.Series(y_te).value_counts())}")
+
+            fold_logs.append(dict(
+                fold=f, best_model=best_name,
+                inner_f1=inner_mean_f1[best_name],
+                outer_f1=outer_f1,
+                n_test=len(te_idx),
+            ))
+
+            # --------------------------------------------------------------
+            #   ③  Weight by this fold’s outer-F1 (or outer-ACC)
+            # --------------------------------------------------------------
+            weighted_importances = importances * outer_f1  # or outer_acc
+
+            # accumulate
+            for feat, w_imp in zip(selected_feats, weighted_importances):
+                feature_score_accumulator[feat] += w_imp
+
+            # keep a pretty DataFrame for optional inspection
+            per_fold_feature_tables.append(
+                pd.DataFrame({"feature": selected_feats,
+                              "importance": importances,
+                              "weighted": weighted_importances,
+                              "fold": f})
+            )
+
+
+        # ─────────────────────────────────────────────────────────────────────
+        # ❺  Aggregate metrics per model & choose global winner
+        # ─────────────────────────────────────────────────────────────────────
+        for mdl, rec in results.items():
+            # below session weighted
+            # rec["mean_f1"] = float(np.mean(rec["per_fold_f1"]))
+            # rec["mean_acc"] = float(np.mean(rec["per_fold_acc"]))
+            w = np.asarray(rec["per_fold_n"], dtype=float)
+            rec["mean_f1"] = float(np.average(rec["per_fold_f1"], weights=w))
+            rec["mean_acc"] = float(np.average(rec["per_fold_acc"], weights=w))
+
+        # store & expose the familiar objects
+        self.fixed_cv_results = results
+        self.fixed_best_model_name = max(results, key=lambda m: results[m]["mean_f1"])
+
+        # ─────────────────────────────────────────────────────────────────────
+        # ❻  Re‑fit the winner on ALL data and save in self.fixed_best_model
+        # ─────────────────────────────────────────────────────────────────────
+        best_base = self.heuristic_models[self.fixed_best_model_name]
+        scaler = StandardScaler().fit(X_all)
+        sel = SelectKBest(f_classif, k=self.n_features_to_select).fit(
+            scaler.transform(X_all), y_all)
+        X_all_sel = sel.transform(scaler.transform(X_all))
+        self.fixed_best_model = clone(best_base).fit(X_all_sel, y_all)
+
+        # --------------------------------------------------------------
+        # ❺  Aggregate weighted scores across folds
+        # --------------------------------------------------------------
+        agg_df = (
+            pd.DataFrame.from_dict(feature_score_accumulator, orient="index",
+                                   columns=["cum_weighted_score"])
+            .sort_values("cum_weighted_score", ascending=False)
+            .reset_index()
+            .rename(columns={"index": "feature"})
+        )
+
+        out_csv = os.path.join(self.run_directory, "crossval_feature_scores.csv")
+        agg_df.to_csv(out_csv, index=False)
+        print_log(f"✓ Saved cross-validated feature scores → {out_csv}")
+
+        # optional bar-plot of top-N
+        TOP_N = 25
+        plt.figure(figsize=(8, 0.4 * TOP_N + 1))
+        sns.barplot(data=agg_df.head(TOP_N),
+                    y="feature", x="cum_weighted_score", orient="h")
+        plt.xlabel("∑ (importance × outer-fold F1)")
+        plt.title(f"Top {TOP_N} features across all outer folds")
+        plt.tight_layout()
+        plt.savefig(os.path.join(self.run_directory,
+                                 f"feature_scores_top{TOP_N}.png"), dpi=300)
+        plt.close()
+
+        print_log(f"\nWinner (fixed‑param): {self.fixed_best_model_name} "
+                  f"with mean F1 = {results[self.fixed_best_model_name]['mean_f1']:.3f}")
+
+        # ─────────────────────────────────────────────────────────────────────
+        # ❼  Save a log CSV (outer‑fold winners) – optional, nice to have
+        # ─────────────────────────────────────────────────────────────────────
+        log_df = pd.DataFrame(fold_logs)
+        log_csv = os.path.join(self.run_directory, "nested_full_log.csv")
+        log_df.to_csv(log_csv, index=False)
+        print_log(f"✓ Saved nested‑CV log → {log_csv}")
+
     # ------------------------------------------------------------
     #  Permutation test – label‑shuffle on fixed CV predictions
     # ------------------------------------------------------------
@@ -2581,6 +2900,7 @@ class EEGAnalyzer:
 
         self.permutation_p_value = {"f1": p_f1, "accuracy": p_acc}
         return self.permutation_p_value, crit95_f1, crit50_f1
+
 
     # ──────────────────────────────────────────────────────────────────────────────
     #  GOLD‑STANDARD PERMUTATION TEST  (full re‑training for every shuffle)
@@ -2692,6 +3012,142 @@ class EEGAnalyzer:
         print_log(f"Saved gold permutation histogram → {out_png}")
 
         return dict(p_f1=p_f1, p_acc=p_acc, crit95_f1=crit95_f1)
+
+
+
+    # ──────────────────────────────────────────────────────────────────────────────
+    #  GOLD‑STANDARD PERMUTATION TEST  (full re‑training for every shuffle)
+    # ──────────────────────────────────────────────────────────────────────────────
+    def permutation_test_true_cv_gold(self,
+                              n_perm: int = 1_000,
+                              random_state: int = 42):
+        """
+        Label‑shuffle permutation test that *re‑trains the winning pipeline*
+        inside the **same outer‑CV scheme** used in run_nested_cv_fixed().
+
+        Returns
+        -------
+        dict with p‑values and critical values for overlay plots.
+        """
+        # honour CLI / ctor argument
+        n_perm = self.permu_count if hasattr(self, "permu_count") else n_perm
+
+        if not hasattr(self, "fixed_cv_results"):
+            raise RuntimeError("Run run_nested_cv_fixed() first")
+
+        import numpy as np, matplotlib.pyplot as plt, os
+        from tqdm import trange
+        from sklearn.base import clone
+        from sklearn.metrics import f1_score, accuracy_score
+        from sklearn.model_selection import LeaveOneOut
+
+        rng = np.random.default_rng(random_state)
+
+        # ─────────────────────────────────────────────────────────────────
+        # 1) Data restricted to winning label pair / triplet
+        # ─────────────────────────────────────────────────────────────────
+        df_best = self.df[self.df["label"].isin(self.best_labels)].reset_index(drop=True)
+        X_all = df_best[self.feature_columns]
+        y_orig = df_best["label"].to_numpy()
+        groups = df_best["session"].values
+
+        # ─────────────────────────────────────────────────────────────────
+        # 2) Outer splitter identical to nested‑CV
+        # ─────────────────────────────────────────────────────────────────
+        if self.cv_method == "loo":
+            outer_cv = LeaveOneOut()
+            outer_iter = outer_cv.split(X_all, y_orig)  # no groups
+        else:
+            outer_cv, _ = self._get_nested_splitters(groups)
+            outer_iter = outer_cv.split(X_all, y_orig, groups)
+
+        # ─────────────────────────────────────────────────────────────────
+        # 3) Winning base model from nested‑CV
+        # ─────────────────────────────────────────────────────────────────
+        base_name = self.fixed_best_model_name
+        base_model = self.heuristic_models[base_name]
+        obs_f1 = self.fixed_cv_results[base_name]["mean_f1"]
+        obs_acc = self.fixed_cv_results[base_name]["mean_acc"]
+
+        null_mean_f1 = np.empty(n_perm, dtype=float)
+        null_mean_acc = np.empty(n_perm, dtype=float)
+
+        print_log(f"\n---- GOLD permutation ({n_perm} shuffles) "
+                  f"– evaluating {base_name} ----")
+
+        # ─────────────────────────────────────────────────────────────────
+        # 4) Permutation loop
+        # ─────────────────────────────────────────────────────────────────
+        for p in trange(n_perm, desc="Permutations"):
+            y_perm = rng.permutation(y_orig)  # shuffle labels BEFORE outer CV
+            f1_per_fold, acc_per_fold, fold_sizes = [], [], []
+
+            # iterate outer folds with the *same* splitter
+            if self.cv_method == "loo":
+                split_iter = outer_cv.split(X_all, y_perm)
+            else:
+                split_iter = outer_cv.split(X_all, y_perm, groups)
+
+            for tr_idx, te_idx in split_iter:
+                X_tr, X_te = X_all.iloc[tr_idx], X_all.iloc[te_idx]
+                y_tr, y_te = y_perm[tr_idx], y_perm[te_idx]
+
+                # identical preprocessing as in run_nested_cv_fixed
+                scaler = StandardScaler().fit(X_tr)
+                sel = SelectKBest(f_classif,
+                                  k=self.n_features_to_select).fit(
+                    scaler.transform(X_tr), y_tr)
+
+                X_tr_sel = sel.transform(scaler.transform(X_tr))
+                X_te_sel = sel.transform(scaler.transform(X_te))
+
+                y_hat = clone(base_model).fit(X_tr_sel, y_tr).predict(X_te_sel)
+                f1_per_fold.append(f1_score(y_te, y_hat, average="macro"))
+                acc_per_fold.append(accuracy_score(y_te, y_hat))
+                fold_sizes.append(len(te_idx))  # ← NEW
+
+            # these were session-meaned, we need sample meaned
+            # null_mean_f1[p] = float(np.mean(f1_per_fold))
+            # null_mean_acc[p] = float(np.mean(acc_per_fold))
+            w = np.asarray(fold_sizes, dtype=float)
+            null_mean_f1[p] = float(np.average(f1_per_fold, weights=w))
+            null_mean_acc[p] = float(np.average(acc_per_fold, weights=w))
+
+        # ─────────────────────────────────────────────────────────────────
+        # 5) p‑values & critical values
+        # ─────────────────────────────────────────────────────────────────
+        p_f1 = (np.sum(null_mean_f1 >= obs_f1) + 1) / (n_perm + 1)
+        p_acc = (np.sum(null_mean_acc >= obs_acc) + 1) / (n_perm + 1)
+
+        crit95_f1, crit50_f1 = np.percentile(null_mean_f1, [95, 50]).astype(float)
+
+        # save thresholds for overlay plots
+        np.save(os.path.join(self.run_directory, "gold_null95.npy"), crit95_f1)
+        np.save(os.path.join(self.run_directory, "gold_null50.npy"), crit50_f1)
+
+        # ─────────────────────────────────────────────────────────────────
+        # 6) Quick histogram figure (optional)
+        # ─────────────────────────────────────────────────────────────────
+        fig, ax = plt.subplots(figsize=(6, 4))
+        ax.hist(null_mean_f1, 30, alpha=.7, label="null μ‑F1")
+        ax.axvline(obs_f1, color="red", lw=2, label=f"observed {obs_f1:.3f}")
+        ax.axvline(crit50_f1, color="brown", ls="-", lw=2,
+                   label=f"50 % null ({crit50_f1:.3f})")
+        ax.axvline(crit95_f1, color="black", ls=":", lw=2,
+                   label=f"95 % null ({crit95_f1:.3f})")
+        ax.set(title=f"Gold permutation – {base_name}\n"
+                     f"p={p_f1:.4f}",
+               xlabel="mean outer‑fold F1", ylabel="count")
+        ax.legend()
+        out_png = os.path.join(self.run_directory,
+                               f"gold_permutation_hist_{base_name}.png")
+        fig.tight_layout()
+        fig.savefig(out_png, dpi=300)
+        plt.close()
+        print_log(f"Saved gold permutation histogram → {out_png}")
+
+        return dict(p_f1=p_f1, p_acc=p_acc,
+                    crit95_f1=crit95_f1, crit50_f1=crit50_f1)
 
     def evaluate_best_model(self):
         """
@@ -2928,8 +3384,8 @@ class EEGAnalyzer:
 
 
         else: # run nested-cv without bayesian with gold standard permuation
-            self.run_nested_cv_fixed()  # chooses the heuristic winner
-            self.permutation_test_gold(n_perm=1000)
+            self.run_true_nested_cv()  # chooses the heuristic winner
+            self.permutation_test_true_cv_gold(n_perm=100)
             self.plot_outer_fold_distribution()
 
             self.visualize_confusion_matrix()
@@ -2972,6 +3428,28 @@ class EEGAnalyzer:
             print_log(
                 f"Optimized model saved to: {self.run_directory}/best_{best_model_name.lower()}_model.pkl"
             )
+
+    def _default_heuristic_models(self):
+        """Return the fixed‑parameter models you used before."""
+        return {
+            "RandomForest": RandomForestClassifier(
+                n_estimators=80, max_depth=3, min_samples_leaf=2,
+                class_weight="balanced", random_state=42, n_jobs=-1),
+            "SVM": SVC(kernel="rbf", C=0.8, gamma="scale",
+                       class_weight="balanced", probability=True, random_state=42),
+            "ElasticNetLogReg": LogisticRegression(
+                penalty="elasticnet", C=1.0, l1_ratio=0.5,
+                solver="saga", max_iter=4000, class_weight="balanced", random_state=42),
+            "ExtraTrees": ExtraTreesClassifier(
+                n_estimators=120, max_depth=4, min_samples_leaf=2,
+                class_weight="balanced", random_state=42, n_jobs=-1),
+            "HGBClassifier": HistGradientBoostingClassifier(
+                learning_rate=0.05, max_depth=3, max_iter=80,
+                class_weight="balanced", random_state=42),
+            "kNN": KNeighborsClassifier(n_neighbors=7, weights="distance"),
+            "GaussianNB": GaussianNB(),
+            "ShrinkageLDA": LinearDiscriminantAnalysis(solver="lsqr", shrinkage="auto"),
+        }
 
 
 def print_log(x):
@@ -3022,7 +3500,7 @@ if __name__ == "__main__":
         type=str,
         default="loso",
         choices=["loo", "kfold", "holdout", "loso", "lmoso"],
-        help="Cross-validation method (default: loo)",
+        help="Cross-validation method (default: loso)",
     )
 
     parser.add_argument(
@@ -3080,6 +3558,7 @@ if __name__ == "__main__":
         test_size=args.test_size,
         permu_count=args.permu_count,
         lmoso_leftout=args.lmoso_leftout,
+        optimize=args.optimize,
     )
 
     analyzer.run_complete_analysis(
