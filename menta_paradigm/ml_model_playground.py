@@ -101,12 +101,13 @@ class EEGAnalyzer:
         test_size=0.2,
         lmoso_leftout: int = 2,
         permu_count=1_000,
-        optimize=False
+        optimize=False,
+            eval=False
     ):  # For holdout validation
 
         # Configuration
         self.features_file = (
-            "data/final_sets/all_channels_binary/" + features_file + ".csv"
+            "data/final_sets/all_channels_binary/no_leak/" + features_file + ".csv"
         )
         self.top_n_labels = top_n_labels
         self.n_features_to_select = n_features_to_select
@@ -126,15 +127,21 @@ class EEGAnalyzer:
         # Create a unique directory for this run
         timestamp = int(time.time())
 
-        if not optimize:
+        if eval:
             self.run_directory = os.path.join(
                 "ml_model_outputs",
-                f"samp_weig_gold-shuffle_{channel_normalization}_{cv_method}_{permu_count}_run_{timestamp}",
+                f"EVAL_{channel_normalization}_samp_weig_gold-shuffle_{cv_method}_{permu_count}_{n_features_to_select}feat_run_{timestamp}",
             )
-        if optimize:
+
+        elif not optimize:
             self.run_directory = os.path.join(
                 "ml_model_outputs",
-                f"samp_weig_o&g-shuffle_{channel_normalization}_{cv_method}_{permu_count}_run_{timestamp}",
+                f"samp_weig_gold-shuffle_{channel_normalization}_{cv_method}_{permu_count}_{n_features_to_select}feat_run_{timestamp}",
+            )
+        elif optimize:
+            self.run_directory = os.path.join(
+                "ml_model_outputs",
+                f"samp_weig_o&g-shuffle_{channel_normalization}_{cv_method}_{permu_count}_{n_features_to_select}feat_run_{timestamp}",
             )
         os.makedirs(self.run_directory, exist_ok=True)
         with open(f"{self.run_directory}/features_file.txt", "w") as f:
@@ -2750,6 +2757,11 @@ class EEGAnalyzer:
         self.fixed_cv_results = results
         self.fixed_best_model_name = max(results, key=lambda m: results[m]["mean_f1"])
 
+
+        with open('results.json', 'w') as f:
+            f.write(str(results))
+
+
         # ─────────────────────────────────────────────────────────────────────
         # ❻  Re‑fit the winner on ALL data and save in self.fixed_best_model
         # ─────────────────────────────────────────────────────────────────────
@@ -3149,6 +3161,186 @@ class EEGAnalyzer:
         return dict(p_f1=p_f1, p_acc=p_acc,
                     crit95_f1=crit95_f1, crit50_f1=crit50_f1)
 
+    def permutation_test_final_true_cv_gold(self,
+                                            n_perm: int = 1_000,
+                                            random_state: int = 42,
+                                            alpha: float = 0.05,
+                                            n_jobs: int = -1,
+                                            batch: int = 50):
+        """
+        Full nested-CV permutation test (parallel + early-stop).
+
+        Parameters
+        ----------
+        n_perm      total permutations *if* early-stop never fires
+        random_state RNG seed for reproducibility
+        alpha       target family-wise α (used by early-stop)
+        n_jobs      passed to joblib.Parallel (-1 = all cores)
+        batch       run this many shuffles in parallel before we re-check stop rule
+        Label-shuffle permutation test that repeats the COMPLETE nested-CV
+        (model selection + outer evaluation) inside every shuffle.
+
+        Returns
+        -------
+        dict with p-values and critical values for overlay plots.
+
+        """
+        # honour CLI / ctor argument
+        n_perm = self.permu_count if hasattr(self, "permu_count") else n_perm
+
+        if not hasattr(self, "fixed_cv_results"):
+            raise RuntimeError("Run run_nested_cv_fixed() first")
+
+        import numpy as np, matplotlib.pyplot as plt, os
+        from tqdm import trange
+        from sklearn.base import clone
+        from sklearn.metrics import f1_score, accuracy_score
+        from sklearn.model_selection import LeaveOneOut, StratifiedKFold, \
+            StratifiedGroupKFold, GroupShuffleSplit, LeavePGroupsOut
+
+        rng = np.random.default_rng(random_state)
+
+        # ─────────────────────────────────────────────────────────────────────
+        # 1) Data restricted to winning label pair / triplet
+        # ─────────────────────────────────────────────────────────────────────
+        df_best = self.df[self.df["label"].isin(self.best_labels)].reset_index(drop=True)
+        X_all = df_best[self.feature_columns]
+        y_orig = df_best["label"].to_numpy()
+        groups = df_best["session"].values
+
+        # ─────────────────────────────────────────────────────────────────────
+        # 2) Outer splitter identical to nested-CV
+        # ─────────────────────────────────────────────────────────────────────
+        if self.cv_method == "loo":
+            outer_cv = LeaveOneOut()
+            outer_split = lambda X, y: outer_cv.split(X, y)  # no groups
+        else:
+            outer_cv, inner_proto_template = self._get_nested_splitters(groups)
+            outer_split = lambda X, y: outer_cv.split(X, y, groups)  # groups version
+
+        # observed stats from the *real* labels (already computed by run_nested_cv_fixed)
+        base_name = self.fixed_best_model_name
+        obs_f1 = self.fixed_cv_results[base_name]["mean_f1"]
+        obs_acc = self.fixed_cv_results[base_name]["mean_acc"]
+
+        null_mean_f1 = np.empty(n_perm, dtype=float)
+        null_mean_acc = np.empty(n_perm, dtype=float)
+
+        print_log(f"\n---- GOLD permutation ({n_perm} shuffles) – full nested-CV ----")
+
+        # ─────────────────────────────────────────────────────────────────────
+        # 3) Permutation loop
+        # ─────────────────────────────────────────────────────────────────────
+
+        # helper --------------------------------------------------------
+
+
+        for p in trange(n_perm, desc="Permutations"):
+            # 3.1 Shuffle labels *once*, before any splitting
+            y_perm = rng.permutation(y_orig)
+
+            f1_per_fold, acc_per_fold, fold_sizes = [], [], []
+
+            # 3.2 Iterate outer folds
+            for tr_idx, te_idx in outer_split(X_all, y_perm):
+                X_tr, X_te = X_all.iloc[tr_idx], X_all.iloc[te_idx]
+                y_tr, y_te = y_perm[tr_idx], y_perm[te_idx]
+                g_tr = groups[tr_idx]
+
+                # 3.2.1 Build inner splitter prototype for *this* outer fold
+                if self.cv_method == "loo":
+                    # default: 3-fold stratified (but never more splits than samples-1)
+                    inner_cv = StratifiedKFold(
+                        n_splits=min(3, len(X_tr) - 1), shuffle=True, random_state=24)
+                    inner_split = lambda X, y: inner_cv.split(X, y)
+                else:
+                    # re-instantiate the same template that run_true_nested_cv() used
+                    inner_proto = inner_proto_template
+                    needs_g = isinstance(inner_proto, (
+                        StratifiedGroupKFold, GroupShuffleSplit, LeavePGroupsOut))
+                    if needs_g:
+                        inner_split = lambda X, y: inner_proto.split(X, y, g_tr)
+                    else:
+                        inner_split = lambda X, y: inner_proto.split(X, y)
+
+                # 3.2.2 INNER LOOP – evaluate every heuristic model
+                inner_mean_f1 = {}
+                for mdl_name, base_mdl in self.heuristic_models.items():
+                    f1_scores_inner = []
+                    for in_tr, in_val in inner_split(X_tr, y_tr):
+                        # preprocessing identical to training pipeline
+                        scaler = StandardScaler().fit(X_tr.iloc[in_tr])
+                        sel = SelectKBest(f_classif,
+                                          k=self.n_features_to_select).fit(
+                            scaler.transform(X_tr.iloc[in_tr]), y_tr[in_tr])
+
+                        Xtr_sel = sel.transform(scaler.transform(X_tr.iloc[in_tr]))
+                        Xval_sel = sel.transform(scaler.transform(X_tr.iloc[in_val]))
+
+                        y_hat = clone(base_mdl).fit(Xtr_sel, y_tr[in_tr]).predict(Xval_sel)
+                        f1_scores_inner.append(f1_score(y_tr[in_val], y_hat, average="macro"))
+
+                    inner_mean_f1[mdl_name] = float(np.mean(f1_scores_inner))
+
+                # pick winner for THIS outer fold
+                winner_name = max(inner_mean_f1, key=inner_mean_f1.get)
+                winner_model = self.heuristic_models[winner_name]
+
+                # 3.2.3 Retrain winner on full outer-train and test on outer-test
+                scaler_full = StandardScaler().fit(X_tr)
+                sel_full = SelectKBest(f_classif,
+                                       k=self.n_features_to_select).fit(
+                    scaler_full.transform(X_tr), y_tr)
+
+                Xtr_full_sel = sel_full.transform(scaler_full.transform(X_tr))
+                Xte_sel = sel_full.transform(scaler_full.transform(X_te))
+
+                y_pred = clone(winner_model).fit(Xtr_full_sel, y_tr).predict(Xte_sel)
+
+                f1_per_fold.append(f1_score(y_te, y_pred, average="macro"))
+                acc_per_fold.append(accuracy_score(y_te, y_pred))
+                fold_sizes.append(len(te_idx))
+
+            # 3.3 Aggregate across outer folds (sample-weighted mean)
+            w = np.asarray(fold_sizes, dtype=float)
+            null_mean_f1[p] = float(np.average(f1_per_fold, weights=w))
+            null_mean_acc[p] = float(np.average(acc_per_fold, weights=w))
+
+        # ─────────────────────────────────────────────────────────────────────
+        # 4) p-values & critical values
+        # ─────────────────────────────────────────────────────────────────────
+        p_f1 = (np.sum(null_mean_f1 >= obs_f1) + 1) / (n_perm + 1)
+        p_acc = (np.sum(null_mean_acc >= obs_acc) + 1) / (n_perm + 1)
+
+        crit95_f1, crit50_f1 = np.percentile(null_mean_f1, [95, 50]).astype(float)
+
+        # save thresholds for overlay plots
+        np.save(os.path.join(self.run_directory, "gold_null95.npy"), crit95_f1)
+        np.save(os.path.join(self.run_directory, "gold_null50.npy"), crit50_f1)
+
+        # ─────────────────────────────────────────────────────────────────────
+        # 5) Quick histogram (optional)
+        # ─────────────────────────────────────────────────────────────────────
+        fig, ax = plt.subplots(figsize=(6, 4))
+        ax.hist(null_mean_f1, 30, alpha=.7, label="null μ-F1")
+        ax.axvline(obs_f1, color="red", lw=2, label=f"observed {obs_f1:.3f}")
+        ax.axvline(crit50_f1, color="brown", lw=2,
+                   label=f"50 % null ({crit50_f1:.3f})")
+        ax.axvline(crit95_f1, color="black", ls=":", lw=2,
+                   label=f"95 % null ({crit95_f1:.3f})")
+        ax.set(title=f"Gold permutation – full nested-CV\np={p_f1:.4f}",
+               xlabel="mean outer-fold F1", ylabel="count")
+        ax.legend()
+        out_png = os.path.join(self.run_directory,
+                               "gold_permutation_hist_fullnested.png")
+        fig.tight_layout()
+        fig.savefig(out_png, dpi=300)
+        plt.close()
+        print_log(f"Saved gold permutation histogram → {out_png}")
+
+        return dict(p_f1=p_f1, p_acc=p_acc,
+                    crit95_f1=crit95_f1, crit50_f1=crit50_f1)
+
     def evaluate_best_model(self):
         """
         Evaluate the best model from hyperparameter optimization using the same
@@ -3385,7 +3577,7 @@ class EEGAnalyzer:
 
         else: # run nested-cv without bayesian with gold standard permuation
             self.run_true_nested_cv()  # chooses the heuristic winner
-            self.permutation_test_true_cv_gold(n_perm=100)
+            self.permutation_test_final_true_cv_gold()
             self.plot_outer_fold_distribution()
 
             self.visualize_confusion_matrix()
@@ -3485,7 +3677,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--n_features",
         type=int,
-        default=30,
+        default=20,
         help="Number of top features to select (default: 8)",
     )
     parser.add_argument(
@@ -3530,6 +3722,11 @@ if __name__ == "__main__":
         help="Test set size for holdout validation (default: 0.2)",
     )
     parser.add_argument(
+        "--eval",
+        action="store_true",
+        help='Run an evaluation task, saves them under eval_preceding'
+    )
+    parser.add_argument(
         "--optimize", action="store_true", help="Perform hyperparameter optimization"
     )
     parser.add_argument(
@@ -3559,6 +3756,7 @@ if __name__ == "__main__":
         permu_count=args.permu_count,
         lmoso_leftout=args.lmoso_leftout,
         optimize=args.optimize,
+        eval=args.eval,
     )
 
     analyzer.run_complete_analysis(

@@ -96,7 +96,7 @@ def _normalise_one_csv(csv_path: Path,
             combat_input = img_df.copy()
             suffix = "ComBat"
 
-        cb_df = apply_combat(combat_input, feat_cols, keep_label=True)
+        cb_df = apply_combat(combat_input, feat_cols, keep_label=False)
         cb_out = out_dir / f"{csv_path.stem}_norm-{suffix}.csv"
         cb_df.to_csv(cb_out, index=False)
         logger.info(f"   saved ComBat file →  {cb_out.name}")
@@ -124,7 +124,7 @@ def identify_feature_columns(df):
 
 def apply_combat(df: pd.DataFrame,
                  feature_columns: list[str],
-                 keep_label: bool = True) -> pd.DataFrame:
+                 keep_label: bool = False) -> pd.DataFrame:
     """
     Run ComBat (neuroHarmonize) across *sessions* to remove scanner / session
     effects that remain after the Z‑score step.
@@ -253,7 +253,7 @@ def normalize_data(imagery_df: pd.DataFrame,
 
         # ----------------------  NEW  ----------------------
         # Optional: run ComBat on the already Z‑scored data
-        normalized_df = apply_combat(normalized_df, feature_columns)
+        # normalized_df = apply_combat(normalized_df, feature_columns)
         # ---------------------------------------------------
 
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -261,7 +261,7 @@ def normalize_data(imagery_df: pd.DataFrame,
         normalized_df = apply_combat(
             normalized_df,
             feature_columns,
-            keep_label = True,
+            keep_label = False,
                               )
 
         return normalized_df, normalization_stats
@@ -362,7 +362,7 @@ def main():
         description="Z-score / ComBat EEG normaliser"
     )
     ap.add_argument("--imagery",
-                    help="CSV file *or* directory of imagery CSVs", default='data/merged_features/14_sessions_merge_1743884222/three_class.csv', required=False)
+                    help="CSV file *or* directory of imagery CSVs", default='data/merged_features/14_sessions_merge_1743884222/channels/po4_raw.csv', required=False)
     ap.add_argument("--baseline",
                     default="data/merged_features/14_sessions_merge_1743884222/merged_features_baseline_post.csv",
                     help="baseline CSV (merged over sessions)")
