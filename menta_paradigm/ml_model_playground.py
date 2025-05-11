@@ -2601,7 +2601,7 @@ class EEGAnalyzer:
             self.heuristic_models = self._default_heuristic_models()  # helper
 
         results = {
-            m: dict(per_fold_true=[], per_fold_pred=[], per_fold_f1=[], per_fold_acc=[], per_fold_n=[])
+            m: dict(per_fold_true=[], per_fold_pred=[], per_fold_f1=[], per_fold_acc=[], per_fold_n=[], per_fold_inner_acc=[])
             for m in self.heuristic_models
         }
 
@@ -2636,9 +2636,9 @@ class EEGAnalyzer:
             # -----------------------------------------------------------------
             # 4.1  INNER loop –%score every model family
             # -----------------------------------------------------------------
-            inner_mean_f1 = {}
+            inner_mean_f1, inner_mean_acc= {}, {}
             for mdl_name, base_mdl in self.heuristic_models.items():
-                f1_inner = []
+                f1_inner, acc_inner=[],[]
                 for in_tr, in_val in inner_splits:
                     scaler = StandardScaler().fit(X_tr.iloc[in_tr])
                     sel = SelectKBest(f_classif, k=self.n_features_to_select).fit(
@@ -2648,8 +2648,10 @@ class EEGAnalyzer:
 
                     y_hat = clone(base_mdl).fit(X_tr_sel, y_tr.iloc[in_tr]).predict(X_val_sel)
                     f1_inner.append(f1_score(y_tr.iloc[in_val], y_hat, average="macro"))
+                    acc_inner.append(accuracy_score(y_tr.iloc[in_val], y_hat))  # ← NEW
 
                 inner_mean_f1[mdl_name] = np.mean(f1_inner)
+                inner_mean_acc[mdl_name] = np.mean(acc_inner)  # ← NEW
 
             # pick the inner‑CV winner
             best_name = max(inner_mean_f1, key=inner_mean_f1.get)
@@ -2678,6 +2680,7 @@ class EEGAnalyzer:
                     accuracy_score(y_te, y_pred)
                 )
                 results[mdl_name]["per_fold_n"].append(len(te_idx))  # ← NEW
+                results[mdl_name]["per_fold_inner_acc"].append(inner_mean_acc[mdl_name])
 
             # --------------------------------------------------------------
             #   ①  Get the selected feature names *in this fold*
@@ -2774,24 +2777,60 @@ class EEGAnalyzer:
                                  outer_f1=f1))
         df_folds = pd.DataFrame(rows)
 
-        # ②  Box / strip plot of outer-fold accuracies
-        fig, ax = plt.subplots(figsize=(10, 6))
-        sns.boxplot(data=df_folds, x="model", y="outer_acc", color="#cfe2f3")
-        sns.stripplot(data=df_folds, x="model", y="outer_acc",
-                      color="black", alpha=0.6, jitter=0.25, size=4)
+        # ---------------------------------------------------------------------------
+        # ②  Box / strip plot of outer-fold accuracies  – coloured by significance
+        # ---------------------------------------------------------------------------
+        if True:
+            fig, ax = plt.subplots(figsize=(10, 6))
 
-        # horizontal reference lines (chance, p=0.05, p=0.005)
-        self.add_accuracy_reference_lines(self.top_n_labels, ax=ax)
+            # ------------------------------------------------------------------
+            # A) decide the thresholds for chance and p=0.05
+            # ------------------------------------------------------------------
+            if self.top_n_labels == 2:  # binary, n = 118
+                p10_thresh=0.568    # p10-p05 is treated as 'trend' though not considered 'significant'
+                p05_thresh = 0.585
+            elif self.top_n_labels == 3:  # three-class, n = 161
+                p10_thresh=0.385
+                p05_thresh = 0.404
+            else:
+                raise ValueError("top_n_labels must be 2 or 3")
 
-        plt.ylabel("Outer-fold accuracy")
-        plt.xlabel("")
-        plt.xticks(rotation=30, ha="right")
-        plt.title("Outer-fold accuracies per model (LOSO)")
-        plt.tight_layout()
-        out_png = os.path.join(self.run_directory, "outer_fold_accuracies.png")
-        plt.savefig(out_png, dpi=300)
-        plt.close()
-        print_log(f"✓ Saved accuracy box plot → {out_png}")
+            # ------------------------------------------------------------------
+            # B) build a palette dict {model_name: colour}
+            # ------------------------------------------------------------------
+            palette = {}
+            for m, rec in results.items():
+                acc = rec["mean_acc"]
+                if acc >= p05_thresh:
+                    palette[m] = "#4daf4a"  # green  → significant
+                elif p10_thresh <= acc < p05_thresh:
+                    palette[m] = "#ffda66"  # yellow → “trend” p =[0.1,0.05]
+                else:
+                    palette[m] = "#bdbdbd"  # grey   → considered 'null'
+
+            # ------------------------------------------------------------------
+            # C) draw the box plot with that palette
+            # ------------------------------------------------------------------
+            sns.boxplot(data=df_folds, x="model", y="outer_acc",
+                        palette=palette, ax=ax, showmeans=True,            meanprops=dict(marker="X",            # bigger, bold “X”
+                           markeredgecolor="black",
+                           markerfacecolor="white",
+                           markersize=8),)
+            sns.stripplot(data=df_folds, x="model", y="outer_acc",
+                          color="black", alpha=0.6, jitter=0.25, size=4, ax=ax)
+
+            ax.set_ylabel("Outer-fold accuracy")
+            ax.set_xlabel("")
+            ax.set_xticklabels(ax.get_xticklabels(), rotation=30, ha="right")
+            ax.set_title(f"Outer-fold accuracies per model {self.cv_method}")
+            fig.tight_layout()
+
+            out_png = os.path.join(self.run_directory, "outer_fold_accuracies.png")
+            fig.savefig(out_png, dpi=300)
+            plt.close()
+            print_log(f"✓ Saved accuracy box plot → {out_png}")
+
+
 
         # ③  Scatter of mean accuracy vs mean F1
         mean_rows = [{"model": m,
@@ -2811,13 +2850,88 @@ class EEGAnalyzer:
 
         plt.ylabel("Sample-weighted mean accuracy")
         plt.xlabel("Sample-weighted mean F1")
-        plt.title("Model-level performance (outer CV)")
+        plt.title(f"Model-level performance (outer CV, {self.cv_method})")
         plt.tight_layout()
         scatter_png = os.path.join(self.run_directory, "model_mean_acc_vs_f1.png")
         plt.savefig(scatter_png, dpi=300)
         plt.close()
         print_log(f"✓ Saved accuracy-vs-F1 scatter → {scatter_png}")
 
+        # ---------------------------------------------------------------------------
+        # ④  Bar plot: inner-CV mean accuracy  vs  outer-fold mean accuracy
+        # ---------------------------------------------------------------------------
+        if True:
+            # We need, for each model:
+            #   • inner_mean_acc  – average of the accuracies the model got on its
+            #                       inner-validation splits (across *all* outer folds)
+            #   • outer_mean_acc  – already in results[model]["mean_acc"]
+            #   • inner_sd, outer_sd  – standard deviations for error bars
+            #
+
+            inner_stats = pd.DataFrame({
+                "inner_mean_acc": {m: np.mean(rec["per_fold_inner_acc"])
+                                   for m, rec in results.items()},
+                "inner_sd": {m: np.std(rec["per_fold_inner_acc"], ddof=1)
+                             for m, rec in results.items()}
+            })
+
+            # ------------------------------------------------------------------
+            # B) gather outer stats (already in results)
+            # ------------------------------------------------------------------
+            outer_stats = pd.DataFrame({
+                "outer_mean_acc": {m: rec["mean_acc"] for m, rec in results.items()},
+                "outer_sd": {m: np.std(rec["per_fold_acc"], ddof=1)
+                             for m, rec in results.items()}
+            })
+
+            # C)  → sort models by *descending* outer mean accuracy  〈〈 NEW 〉〉
+            ordered_models = (outer_stats["outer_mean_acc"]
+                              .sort_values(ascending=False)
+                              .index)
+
+            # D) merge, then re-index to that order ----------------------------
+            stats_df = (inner_stats.join(outer_stats, how="outer")
+                        .loc[ordered_models]  # keep the order
+                        .reset_index()
+                        .rename(columns={"index": "model"}))
+
+            # ------------------------------------------------------------------
+            # E) make the bar plot
+            # ------------------------------------------------------------------
+            fig, ax = plt.subplots(figsize=(10, 6))
+
+            x = np.arange(len(stats_df))  # model positions
+            width = 0.35
+
+            ax.bar(x - width / 2, stats_df["inner_mean_acc"],
+                   width, yerr=stats_df["inner_sd"],
+                   label="Inner (mean CV acc)", color="#3182bd", alpha=0.9,
+                   capsize=4)
+            ax.bar(x + width / 2, stats_df["outer_mean_acc"],
+                   width, yerr=stats_df["outer_sd"],
+                   label="Outer (held-out acc)", color="#fdb863", alpha=0.9,
+                   capsize=4)
+
+            # Add the text value on top of each bar
+            for i, row in stats_df.iterrows():
+                ax.text(i - width / 2, row["inner_mean_acc"] + 0.01,
+                        f"{row['inner_mean_acc']:.3f}", ha="center", va="bottom", fontsize=8)
+                ax.text(i + width / 2, row["outer_mean_acc"] + 0.01,
+                        f"{row['outer_mean_acc']:.3f}", ha="center", va="bottom", fontsize=8)
+
+            ax.set_xticks(x)
+            ax.set_xticklabels(stats_df["model"], rotation=30, ha="right")
+            ax.set_ylabel("Accuracy")
+            ax.set_ylim(0, 1)
+            ax.set_title("Nested-CV mean accuracy: inner selection vs outer test")
+            ax.legend(frameon=False)
+            fig.tight_layout()
+
+            inner_outer_png = os.path.join(self.run_directory,
+                                           "inner_vs_outer_mean_accuracy.png")
+            fig.savefig(inner_outer_png, dpi=300)
+            plt.close()
+            print_log(f"✓ Saved inner-vs-outer accuracy plot → {inner_outer_png}")
 
         # ─────────────────────────────────────────────────────────────────────
         # ❻  Re‑fit the winner on ALL data and save in self.fixed_best_model
@@ -3431,7 +3545,7 @@ class EEGAnalyzer:
                    ls="--", lw=1.5, color=col["p005"],
                    label=f"p = 0.005 ({thresh[n_classes]['p005']:.3f})")
 
-        ax.legend(loc=loc, frameon=False, fontsize=9)
+        ax.legend(loc='center right', frameon=False, fontsize=9)
 
     def evaluate_best_model(self):
         """
