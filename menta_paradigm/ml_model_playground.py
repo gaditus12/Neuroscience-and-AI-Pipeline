@@ -2734,12 +2734,13 @@ class EEGAnalyzer:
                 feature_score_accumulator[feat] += w_imp
 
             # keep a pretty DataFrame for optional inspection
-            per_fold_feature_tables.append(
-                pd.DataFrame({"feature": selected_feats,
-                              "importance": importances,
-                              "weighted": weighted_importances,
-                              "fold": f})
-            )
+            # TODO REVERT, not really necessary but breaks 3-class classifiaction runs
+            # per_fold_feature_tables.append(
+            #     pd.DataFrame({"feature": selected_feats,
+            #                   "importance": importances,
+            #                   "weighted": weighted_importances,
+            #                   "fold": f})
+            # )
 
 
         # ─────────────────────────────────────────────────────────────────────
@@ -2757,9 +2758,65 @@ class EEGAnalyzer:
         self.fixed_cv_results = results
         self.fixed_best_model_name = max(results, key=lambda m: results[m]["mean_f1"])
 
+        # ---------------------------------------------------------------------------
+        # Pretty plots of the CV results
+        # ---------------------------------------------------------------------------
+        import os, pandas as pd, matplotlib.pyplot as plt, seaborn as sns
 
-        with open('results.json', 'w') as f:
-            f.write(str(results))
+        # ①  Tidy DataFrame with one row per outer fold
+        rows = []
+        for mdl, rec in results.items():
+            for fold_i, (acc, f1) in enumerate(zip(rec["per_fold_acc"],
+                                                   rec["per_fold_f1"]), start=1):
+                rows.append(dict(model=mdl,
+                                 fold=fold_i,
+                                 outer_acc=acc,
+                                 outer_f1=f1))
+        df_folds = pd.DataFrame(rows)
+
+        # ②  Box / strip plot of outer-fold accuracies
+        fig, ax = plt.subplots(figsize=(10, 6))
+        sns.boxplot(data=df_folds, x="model", y="outer_acc", color="#cfe2f3")
+        sns.stripplot(data=df_folds, x="model", y="outer_acc",
+                      color="black", alpha=0.6, jitter=0.25, size=4)
+
+        # horizontal reference lines (chance, p=0.05, p=0.005)
+        self.add_accuracy_reference_lines(self.top_n_labels, ax=ax)
+
+        plt.ylabel("Outer-fold accuracy")
+        plt.xlabel("")
+        plt.xticks(rotation=30, ha="right")
+        plt.title("Outer-fold accuracies per model (LOSO)")
+        plt.tight_layout()
+        out_png = os.path.join(self.run_directory, "outer_fold_accuracies.png")
+        plt.savefig(out_png, dpi=300)
+        plt.close()
+        print_log(f"✓ Saved accuracy box plot → {out_png}")
+
+        # ③  Scatter of mean accuracy vs mean F1
+        mean_rows = [{"model": m,
+                      "mean_acc": rec["mean_acc"],
+                      "mean_f1": rec["mean_f1"]}
+                     for m, rec in results.items()]
+        df_mean = pd.DataFrame(mean_rows)
+
+        fig, ax = plt.subplots(figsize=(6, 5))
+        sns.scatterplot(ax=ax, data=df_mean, x="mean_f1", y="mean_acc", s=80)
+        for _, r in df_mean.iterrows():
+            ax.text(r["mean_f1"] + 0.002, r["mean_acc"], r["model"],
+                    fontsize=8, va="center")
+
+        # horizontal reference lines (chance, p=0.05, p=0.005)
+        self.add_accuracy_reference_lines(self.top_n_labels, ax=ax)
+
+        plt.ylabel("Sample-weighted mean accuracy")
+        plt.xlabel("Sample-weighted mean F1")
+        plt.title("Model-level performance (outer CV)")
+        plt.tight_layout()
+        scatter_png = os.path.join(self.run_directory, "model_mean_acc_vs_f1.png")
+        plt.savefig(scatter_png, dpi=300)
+        plt.close()
+        print_log(f"✓ Saved accuracy-vs-F1 scatter → {scatter_png}")
 
 
         # ─────────────────────────────────────────────────────────────────────
@@ -3168,107 +3225,95 @@ class EEGAnalyzer:
                                             n_jobs: int = -1,
                                             batch: int = 50):
         """
-        Full nested-CV permutation test (parallel + early-stop).
+        Full nested-CV permutation test (multicore + progress bar).
 
         Parameters
         ----------
-        n_perm      total permutations *if* early-stop never fires
-        random_state RNG seed for reproducibility
-        alpha       target family-wise α (used by early-stop)
-        n_jobs      passed to joblib.Parallel (-1 = all cores)
-        batch       run this many shuffles in parallel before we re-check stop rule
-        Label-shuffle permutation test that repeats the COMPLETE nested-CV
-        (model selection + outer evaluation) inside every shuffle.
+        n_perm       Number of permutations
+        random_state RNG seed
+        alpha        Kept for API compat (not used here)
+        n_jobs       CPU cores for joblib (-1 = all)
+        batch        How many permutations each Parallel call runs before tqdm updates
 
         Returns
         -------
-        dict with p-values and critical values for overlay plots.
-
+        dict with p-values and critical values for overlay plots
         """
         # honour CLI / ctor argument
         n_perm = self.permu_count if hasattr(self, "permu_count") else n_perm
-
         if not hasattr(self, "fixed_cv_results"):
             raise RuntimeError("Run run_nested_cv_fixed() first")
 
-        import numpy as np, matplotlib.pyplot as plt, os
-        from tqdm import trange
+        # ---------------------------------------------------------------- imports
+        import os, numpy as np, matplotlib.pyplot as plt
+        from joblib import Parallel, delayed
+        from tqdm import tqdm  # ← progress bar
         from sklearn.base import clone
         from sklearn.metrics import f1_score, accuracy_score
-        from sklearn.model_selection import LeaveOneOut, StratifiedKFold, \
-            StratifiedGroupKFold, GroupShuffleSplit, LeavePGroupsOut
+        from sklearn.model_selection import (LeaveOneOut, StratifiedKFold,
+                                             StratifiedGroupKFold, GroupShuffleSplit,
+                                             LeavePGroupsOut)
+        from sklearn.preprocessing import StandardScaler
+        from sklearn.feature_selection import SelectKBest, f_classif
+        # ------------------------------------------------------------------------
 
-        rng = np.random.default_rng(random_state)
+        rng_master = np.random.default_rng(random_state)
 
-        # ─────────────────────────────────────────────────────────────────────
-        # 1) Data restricted to winning label pair / triplet
-        # ─────────────────────────────────────────────────────────────────────
+        # 1) Data restricted to winning label set -------------------------------
         df_best = self.df[self.df["label"].isin(self.best_labels)].reset_index(drop=True)
         X_all = df_best[self.feature_columns]
         y_orig = df_best["label"].to_numpy()
         groups = df_best["session"].values
 
-        # ─────────────────────────────────────────────────────────────────────
-        # 2) Outer splitter identical to nested-CV
-        # ─────────────────────────────────────────────────────────────────────
+        # 2) Outer splitter identical to nested-CV ------------------------------
         if self.cv_method == "loo":
             outer_cv = LeaveOneOut()
-            outer_split = lambda X, y: outer_cv.split(X, y)  # no groups
+            outer_split = lambda X, y: outer_cv.split(X, y)
+            inner_proto_template = None
         else:
             outer_cv, inner_proto_template = self._get_nested_splitters(groups)
-            outer_split = lambda X, y: outer_cv.split(X, y, groups)  # groups version
+            outer_split = lambda X, y: outer_cv.split(X, y, groups)
 
-        # observed stats from the *real* labels (already computed by run_nested_cv_fixed)
-        base_name = self.fixed_best_model_name
-        obs_f1 = self.fixed_cv_results[base_name]["mean_f1"]
-        obs_acc = self.fixed_cv_results[base_name]["mean_acc"]
+        # observed scores from the real labels
+        best_name = self.fixed_best_model_name
+        obs_f1 = self.fixed_cv_results[best_name]["mean_f1"]
+        obs_acc = self.fixed_cv_results[best_name]["mean_acc"]
 
-        null_mean_f1 = np.empty(n_perm, dtype=float)
-        null_mean_acc = np.empty(n_perm, dtype=float)
+        print_log(f"\n---- GOLD permutation ({n_perm} shuffles, "
+                  f"batch={batch}, n_jobs={n_jobs}) – full nested-CV ----")
 
-        print_log(f"\n---- GOLD permutation ({n_perm} shuffles) – full nested-CV ----")
-
-        # ─────────────────────────────────────────────────────────────────────
-        # 3) Permutation loop
-        # ─────────────────────────────────────────────────────────────────────
-
-        # helper --------------------------------------------------------
-
-
-        for p in trange(n_perm, desc="Permutations"):
-            # 3.1 Shuffle labels *once*, before any splitting
+        # ---------------------------------------------------------------- helper
+        def _one_permutation(seed: int) -> tuple[float, float]:
+            """Run ONE shuffle through the complete nested-CV pipeline."""
+            rng = np.random.default_rng(seed)
             y_perm = rng.permutation(y_orig)
 
-            f1_per_fold, acc_per_fold, fold_sizes = [], [], []
+            f1_per_fold, acc_per_fold, sizes = [], [], []
 
-            # 3.2 Iterate outer folds
             for tr_idx, te_idx in outer_split(X_all, y_perm):
                 X_tr, X_te = X_all.iloc[tr_idx], X_all.iloc[te_idx]
                 y_tr, y_te = y_perm[tr_idx], y_perm[te_idx]
                 g_tr = groups[tr_idx]
 
-                # 3.2.1 Build inner splitter prototype for *this* outer fold
+                # inner splitter
                 if self.cv_method == "loo":
-                    # default: 3-fold stratified (but never more splits than samples-1)
                     inner_cv = StratifiedKFold(
-                        n_splits=min(3, len(X_tr) - 1), shuffle=True, random_state=24)
+                        n_splits=min(3, len(X_tr) - 1),
+                        shuffle=True, random_state=24)
                     inner_split = lambda X, y: inner_cv.split(X, y)
                 else:
-                    # re-instantiate the same template that run_true_nested_cv() used
-                    inner_proto = inner_proto_template
-                    needs_g = isinstance(inner_proto, (
-                        StratifiedGroupKFold, GroupShuffleSplit, LeavePGroupsOut))
-                    if needs_g:
-                        inner_split = lambda X, y: inner_proto.split(X, y, g_tr)
-                    else:
-                        inner_split = lambda X, y: inner_proto.split(X, y)
+                    proto = inner_proto_template
+                    needs_g = isinstance(proto, (StratifiedGroupKFold,
+                                                 GroupShuffleSplit, LeavePGroupsOut))
+                    inner_split = (lambda X, y: proto.split(X, y, g_tr)
+                    if needs_g else
+                    lambda X, y: proto.split(X, y))
 
-                # 3.2.2 INNER LOOP – evaluate every heuristic model
+                # model family selection
                 inner_mean_f1 = {}
                 for mdl_name, base_mdl in self.heuristic_models.items():
-                    f1_scores_inner = []
+                    scores = []
                     for in_tr, in_val in inner_split(X_tr, y_tr):
-                        # preprocessing identical to training pipeline
                         scaler = StandardScaler().fit(X_tr.iloc[in_tr])
                         sel = SelectKBest(f_classif,
                                           k=self.n_features_to_select).fit(
@@ -3278,49 +3323,57 @@ class EEGAnalyzer:
                         Xval_sel = sel.transform(scaler.transform(X_tr.iloc[in_val]))
 
                         y_hat = clone(base_mdl).fit(Xtr_sel, y_tr[in_tr]).predict(Xval_sel)
-                        f1_scores_inner.append(f1_score(y_tr[in_val], y_hat, average="macro"))
+                        scores.append(f1_score(y_tr[in_val], y_hat, average="macro"))
+                    inner_mean_f1[mdl_name] = float(np.mean(scores))
 
-                    inner_mean_f1[mdl_name] = float(np.mean(f1_scores_inner))
+                winner = max(inner_mean_f1, key=inner_mean_f1.get)
+                win_mdl = self.heuristic_models[winner]
 
-                # pick winner for THIS outer fold
-                winner_name = max(inner_mean_f1, key=inner_mean_f1.get)
-                winner_model = self.heuristic_models[winner_name]
-
-                # 3.2.3 Retrain winner on full outer-train and test on outer-test
+                # outer-fold train/test
                 scaler_full = StandardScaler().fit(X_tr)
                 sel_full = SelectKBest(f_classif,
                                        k=self.n_features_to_select).fit(
                     scaler_full.transform(X_tr), y_tr)
 
-                Xtr_full_sel = sel_full.transform(scaler_full.transform(X_tr))
+                Xtr_sel = sel_full.transform(scaler_full.transform(X_tr))
                 Xte_sel = sel_full.transform(scaler_full.transform(X_te))
 
-                y_pred = clone(winner_model).fit(Xtr_full_sel, y_tr).predict(Xte_sel)
+                y_pred = clone(win_mdl).fit(Xtr_sel, y_tr).predict(Xte_sel)
 
                 f1_per_fold.append(f1_score(y_te, y_pred, average="macro"))
                 acc_per_fold.append(accuracy_score(y_te, y_pred))
-                fold_sizes.append(len(te_idx))
+                sizes.append(len(te_idx))
 
-            # 3.3 Aggregate across outer folds (sample-weighted mean)
-            w = np.asarray(fold_sizes, dtype=float)
-            null_mean_f1[p] = float(np.average(f1_per_fold, weights=w))
-            null_mean_acc[p] = float(np.average(acc_per_fold, weights=w))
+            w = np.asarray(sizes, float)
+            return (float(np.average(f1_per_fold, weights=w)),
+                    float(np.average(acc_per_fold, weights=w)))
 
-        # ─────────────────────────────────────────────────────────────────────
-        # 4) p-values & critical values
-        # ─────────────────────────────────────────────────────────────────────
+        # 3) Parallel batches + progress bar -------------------------------------
+        seeds = rng_master.integers(0, 2 ** 32 - 1, size=n_perm)
+        null_f1 = []
+        null_acc = []
+
+        for start in tqdm(range(0, n_perm, batch), desc="Permutations", unit="batch"):
+            batch_seeds = seeds[start: start + batch]
+            batch_res = Parallel(n_jobs=n_jobs, backend="loky", prefer="processes")(
+                delayed(_one_permutation)(s) for s in batch_seeds)
+
+            bf1, bacc = zip(*batch_res)
+            null_f1.extend(bf1)
+            null_acc.extend(bacc)
+
+        null_mean_f1 = np.asarray(null_f1)
+        null_mean_acc = np.asarray(null_acc)
+
+        # 4) p-values & critical thresholds --------------------------------------
         p_f1 = (np.sum(null_mean_f1 >= obs_f1) + 1) / (n_perm + 1)
         p_acc = (np.sum(null_mean_acc >= obs_acc) + 1) / (n_perm + 1)
 
         crit95_f1, crit50_f1 = np.percentile(null_mean_f1, [95, 50]).astype(float)
-
-        # save thresholds for overlay plots
         np.save(os.path.join(self.run_directory, "gold_null95.npy"), crit95_f1)
         np.save(os.path.join(self.run_directory, "gold_null50.npy"), crit50_f1)
 
-        # ─────────────────────────────────────────────────────────────────────
-        # 5) Quick histogram (optional)
-        # ─────────────────────────────────────────────────────────────────────
+        # 5) quick histogram ------------------------------------------------------
         fig, ax = plt.subplots(figsize=(6, 4))
         ax.hist(null_mean_f1, 30, alpha=.7, label="null μ-F1")
         ax.axvline(obs_f1, color="red", lw=2, label=f"observed {obs_f1:.3f}")
@@ -3328,7 +3381,7 @@ class EEGAnalyzer:
                    label=f"50 % null ({crit50_f1:.3f})")
         ax.axvline(crit95_f1, color="black", ls=":", lw=2,
                    label=f"95 % null ({crit95_f1:.3f})")
-        ax.set(title=f"Gold permutation – full nested-CV\np={p_f1:.4f}",
+        ax.set(title=f"Gold permutation – full nested-CV (p={p_f1:.4f})",
                xlabel="mean outer-fold F1", ylabel="count")
         ax.legend()
         out_png = os.path.join(self.run_directory,
@@ -3340,6 +3393,45 @@ class EEGAnalyzer:
 
         return dict(p_f1=p_f1, p_acc=p_acc,
                     crit95_f1=crit95_f1, crit50_f1=crit50_f1)
+
+    def add_accuracy_reference_lines(self, n_classes: int,
+                                     ax: plt.Axes | None = None,
+                                     colors: dict | None = None,
+                                     loc: str = "lower right"):
+        """
+        Draw chance + two significance thresholds on an existing plot.
+
+        Parameters
+        ----------
+        n_classes : int           2 or 3
+        ax        : matplotlib Axes (default: current axes)
+        colors    : dict with keys 'chance', 'p05', 'p005'
+        loc       : legend location
+        """
+        if ax is None:
+            ax = plt.gca()
+
+        # -------------------- thresholds for your sample sizes -------------------
+        thresh = {
+            2: dict(chance=0.50, p05=0.585, p005=0.625),  # n = 118
+            3: dict(chance=1 / 3, p05=0.404, p005=0.435),  # n = 161
+        }
+        if n_classes not in thresh:
+            raise ValueError("n_classes must be 2 or 3")
+
+        col = colors or dict(chance="grey", p05="orange", p005="purple")
+
+        ax.axhline(thresh[n_classes]["chance"],
+                   ls="--", lw=1.5, color=col["chance"],
+                   label=f"Chance ({thresh[n_classes]['chance']:.3f})")
+        ax.axhline(thresh[n_classes]["p05"],
+                   ls="--", lw=1.5, color=col["p05"],
+                   label=f"p = 0.05 ({thresh[n_classes]['p05']:.3f})")
+        ax.axhline(thresh[n_classes]["p005"],
+                   ls="--", lw=1.5, color=col["p005"],
+                   label=f"p = 0.005 ({thresh[n_classes]['p005']:.3f})")
+
+        ax.legend(loc=loc, frameon=False, fontsize=9)
 
     def evaluate_best_model(self):
         """
