@@ -77,7 +77,7 @@ def _normalise_one_csv(csv_path: Path,
     img_df   = pd.read_csv(csv_path)
     feat_cols = identify_feature_columns(img_df)
 
-    # --- Z-score (always if 'z' in steps) ------------------------------
+    # --- Z-score------------------------------
     if steps in {"z", "both"}:
         z_df, stats = normalize_data(img_df, baseline_df, feat_cols,
                                      run_combat=False)
@@ -85,7 +85,7 @@ def _normalise_one_csv(csv_path: Path,
         z_df.to_csv(z_out, index=False)
         logger.info(f"   saved Z-scored   →  {z_out.name}")
 
-    # --- ComBat (optionally after Z) -----------------------------------
+    # --- ComBat -----------------------------------
     if steps in {"combat", "both"}:
 
         if steps == "both":
@@ -131,9 +131,9 @@ def apply_combat(df: pd.DataFrame,
 
     Parameters
     ----------
-    df               : data to harmonise – **must already be z‑scored**
+    df               : data to harmonise
     feature_columns  : numeric feature names
-    keep_label       : if True the ‘label’ column is passed to ComBat as a
+    keep_label       : if True the ‘label’ column is passed to ComBat as a
                        biological covariate so the class signal is *preserved*.
 
     Returns
@@ -153,7 +153,9 @@ def apply_combat(df: pd.DataFrame,
     # supply label as an **integer code** so harmonizationLearn treats it as numeric
 
     if keep_label and "label" in df.columns:
-        covars["LABEL"] = df["label"].astype("category").cat.codes
+        # commented out, should not be used due to model 'peeking' on labels
+        # covars["LABEL"] = df["label"].astype("category").cat.codes
+        ...
     # ----------------------------------------------------------------------
 
     logger.info("Running ComBat (neuroHarmonize)…")
@@ -362,7 +364,7 @@ def main():
         description="Z-score / ComBat EEG normaliser"
     )
     ap.add_argument("--imagery",
-                    help="CSV file *or* directory of imagery CSVs", default='data/merged_features/14_sessions_merge_1743884222/three_class/three_class_o1.csv', required=False)
+                    help="CSV file *or* directory of imagery CSVs", default='data/merged_features/16_sessions_merge_0.5Hz/o2_two_0.5Hz_raw.csv', required=False)
     ap.add_argument("--baseline",
                     default="data/merged_features/14_sessions_merge_1743884222/merged_features_baseline_post.csv",
                     help="baseline CSV (merged over sessions)")

@@ -2581,6 +2581,7 @@ class EEGAnalyzer:
             inner_proto = StratifiedKFold(
                 n_splits=min(3, len(X_all) - 1), shuffle=True, random_state=24)
         else:
+
             outer_cv, inner_proto = self._get_nested_splitters(groups)
 
             # does the OUTER splitter need a `groups` array?
@@ -2822,7 +2823,16 @@ class EEGAnalyzer:
             ax.set_ylabel("Outer-fold accuracy")
             ax.set_xlabel("")
             ax.set_xticklabels(ax.get_xticklabels(), rotation=30, ha="right")
-            ax.set_title(f"Outer-fold accuracies per model {self.cv_method}")
+            ax.set_title(f"Outer-fold accuracies per model with {self.cv_method} cross validation")
+            import matplotlib.patches as mpatches
+            green_patch = mpatches.Patch(color='green', label='Significant Accuracy (p<0.05)')
+            yellow_patch = mpatches.Patch(color='yellow', label='Trend (0.05<p<0.1)')
+            grey_patch = mpatches.Patch(color='grey', label='Not Significant or Trend (p>0.1)')
+            # 2) Pass them into legend via the handles kwarg:
+            ax.legend(handles=[green_patch, yellow_patch, grey_patch],
+                      loc='lower right',
+                      frameon=False)  # or any other style tweaks
+
             fig.tight_layout()
 
             out_png = os.path.join(self.run_directory, "outer_fold_accuracies.png")
@@ -2851,6 +2861,7 @@ class EEGAnalyzer:
         plt.ylabel("Sample-weighted mean accuracy")
         plt.xlabel("Sample-weighted mean F1")
         plt.title(f"Model-level performance (outer CV, {self.cv_method})")
+        plt.legend(loc='lower right')
         plt.tight_layout()
         scatter_png = os.path.join(self.run_directory, "model_mean_acc_vs_f1.png")
         plt.savefig(scatter_png, dpi=300)
@@ -3333,13 +3344,14 @@ class EEGAnalyzer:
                     crit95_f1=crit95_f1, crit50_f1=crit50_f1)
 
     def permutation_test_final_true_cv_gold(self,
-                                            n_perm: int = 1_000,
-                                            random_state: int = 42,
-                                            alpha: float = 0.05,
-                                            n_jobs: int = -1,
-                                            batch: int = 50):
+                                        n_perm: int = 1_000,
+                                        random_state: int = 42,
+                                        alpha: float = 0.05,
+                                        n_jobs: int = -1,
+                                        batch: int = 50):
         """
-        Full nested-CV permutation test (multicore + progress bar).
+        Full nested-CV permutation test (multicore + progress bar) with separate histograms
+        for F1 and accuracy, and theoretical binomial overlay on accuracy plot.
 
         Parameters
         ----------
@@ -3358,10 +3370,9 @@ class EEGAnalyzer:
         if not hasattr(self, "fixed_cv_results"):
             raise RuntimeError("Run run_nested_cv_fixed() first")
 
-        # ---------------------------------------------------------------- imports
-        import os, numpy as np, matplotlib.pyplot as plt
+        import os, numpy as np
         from joblib import Parallel, delayed
-        from tqdm import tqdm  # ← progress bar
+        from tqdm import tqdm
         from sklearn.base import clone
         from sklearn.metrics import f1_score, accuracy_score
         from sklearn.model_selection import (LeaveOneOut, StratifiedKFold,
@@ -3369,17 +3380,21 @@ class EEGAnalyzer:
                                              LeavePGroupsOut)
         from sklearn.preprocessing import StandardScaler
         from sklearn.feature_selection import SelectKBest, f_classif
-        # ------------------------------------------------------------------------
+        # ensure scipy available for binomial
+        try:
+            from scipy.stats import binom
+        except ImportError:
+            binom = None
 
         rng_master = np.random.default_rng(random_state)
 
-        # 1) Data restricted to winning label set -------------------------------
+        # Data restricted to winning label set
         df_best = self.df[self.df["label"].isin(self.best_labels)].reset_index(drop=True)
         X_all = df_best[self.feature_columns]
         y_orig = df_best["label"].to_numpy()
         groups = df_best["session"].values
 
-        # 2) Outer splitter identical to nested-CV ------------------------------
+        # Outer splitter identical to nested-CV
         if self.cv_method == "loo":
             outer_cv = LeaveOneOut()
             outer_split = lambda X, y: outer_cv.split(X, y)
@@ -3388,17 +3403,14 @@ class EEGAnalyzer:
             outer_cv, inner_proto_template = self._get_nested_splitters(groups)
             outer_split = lambda X, y: outer_cv.split(X, y, groups)
 
-        # observed scores from the real labels
+        # observed metrics
         best_name = self.fixed_best_model_name
         obs_f1 = self.fixed_cv_results[best_name]["mean_f1"]
         obs_acc = self.fixed_cv_results[best_name]["mean_acc"]
 
-        print_log(f"\n---- GOLD permutation ({n_perm} shuffles, "
-                  f"batch={batch}, n_jobs={n_jobs}) – full nested-CV ----")
+        print_log(f"\n---- GOLD permutation ({n_perm} shuffles, batch={batch}, n_jobs={n_jobs}) ----")
 
-        # ---------------------------------------------------------------- helper
         def _one_permutation(seed: int) -> tuple[float, float]:
-            """Run ONE shuffle through the complete nested-CV pipeline."""
             rng = np.random.default_rng(seed)
             y_perm = rng.permutation(y_orig)
 
@@ -3411,31 +3423,26 @@ class EEGAnalyzer:
 
                 # inner splitter
                 if self.cv_method == "loo":
-                    inner_cv = StratifiedKFold(
-                        n_splits=min(3, len(X_tr) - 1),
-                        shuffle=True, random_state=24)
+                    inner_cv = StratifiedKFold(n_splits=min(3, len(X_tr)-1),
+                                               shuffle=True, random_state=24)
                     inner_split = lambda X, y: inner_cv.split(X, y)
                 else:
                     proto = inner_proto_template
                     needs_g = isinstance(proto, (StratifiedGroupKFold,
                                                  GroupShuffleSplit, LeavePGroupsOut))
                     inner_split = (lambda X, y: proto.split(X, y, g_tr)
-                    if needs_g else
-                    lambda X, y: proto.split(X, y))
+                                   if needs_g else lambda X, y: proto.split(X, y))
 
-                # model family selection
+                # model selection by inner CV
                 inner_mean_f1 = {}
                 for mdl_name, base_mdl in self.heuristic_models.items():
                     scores = []
                     for in_tr, in_val in inner_split(X_tr, y_tr):
                         scaler = StandardScaler().fit(X_tr.iloc[in_tr])
-                        sel = SelectKBest(f_classif,
-                                          k=self.n_features_to_select).fit(
+                        sel = SelectKBest(f_classif, k=self.n_features_to_select).fit(
                             scaler.transform(X_tr.iloc[in_tr]), y_tr[in_tr])
-
                         Xtr_sel = sel.transform(scaler.transform(X_tr.iloc[in_tr]))
                         Xval_sel = sel.transform(scaler.transform(X_tr.iloc[in_val]))
-
                         y_hat = clone(base_mdl).fit(Xtr_sel, y_tr[in_tr]).predict(Xval_sel)
                         scores.append(f1_score(y_tr[in_val], y_hat, average="macro"))
                     inner_mean_f1[mdl_name] = float(np.mean(scores))
@@ -3443,15 +3450,12 @@ class EEGAnalyzer:
                 winner = max(inner_mean_f1, key=inner_mean_f1.get)
                 win_mdl = self.heuristic_models[winner]
 
-                # outer-fold train/test
+                # retrain and predict on outer test
                 scaler_full = StandardScaler().fit(X_tr)
-                sel_full = SelectKBest(f_classif,
-                                       k=self.n_features_to_select).fit(
+                sel_full = SelectKBest(f_classif, k=self.n_features_to_select).fit(
                     scaler_full.transform(X_tr), y_tr)
-
                 Xtr_sel = sel_full.transform(scaler_full.transform(X_tr))
                 Xte_sel = sel_full.transform(scaler_full.transform(X_te))
-
                 y_pred = clone(win_mdl).fit(Xtr_sel, y_tr).predict(Xte_sel)
 
                 f1_per_fold.append(f1_score(y_te, y_pred, average="macro"))
@@ -3462,16 +3466,13 @@ class EEGAnalyzer:
             return (float(np.average(f1_per_fold, weights=w)),
                     float(np.average(acc_per_fold, weights=w)))
 
-        # 3) Parallel batches + progress bar -------------------------------------
-        seeds = rng_master.integers(0, 2 ** 32 - 1, size=n_perm)
-        null_f1 = []
-        null_acc = []
-
+        # Parallel shuffle
+        seeds = rng_master.integers(0, 2**32-1, size=n_perm)
+        null_f1, null_acc = [], []
         for start in tqdm(range(0, n_perm, batch), desc="Permutations", unit="batch"):
-            batch_seeds = seeds[start: start + batch]
-            batch_res = Parallel(n_jobs=n_jobs, backend="loky", prefer="processes")(
-                delayed(_one_permutation)(s) for s in batch_seeds)
-
+            batch_seeds = seeds[start:start+batch]
+            batch_res = Parallel(n_jobs=n_jobs, backend="loky")(delayed(_one_permutation)(s)
+                                                                for s in batch_seeds)
             bf1, bacc = zip(*batch_res)
             null_f1.extend(bf1)
             null_acc.extend(bacc)
@@ -3479,34 +3480,99 @@ class EEGAnalyzer:
         null_mean_f1 = np.asarray(null_f1)
         null_mean_acc = np.asarray(null_acc)
 
-        # 4) p-values & critical thresholds --------------------------------------
+        # p-values & thresholds
         p_f1 = (np.sum(null_mean_f1 >= obs_f1) + 1) / (n_perm + 1)
         p_acc = (np.sum(null_mean_acc >= obs_acc) + 1) / (n_perm + 1)
-
         crit95_f1, crit50_f1 = np.percentile(null_mean_f1, [95, 50]).astype(float)
-        np.save(os.path.join(self.run_directory, "gold_null95.npy"), crit95_f1)
-        np.save(os.path.join(self.run_directory, "gold_null50.npy"), crit50_f1)
+        crit95_acc, crit50_acc = np.percentile(null_mean_acc, [95, 50]).astype(float)
 
-        # 5) quick histogram ------------------------------------------------------
-        fig, ax = plt.subplots(figsize=(6, 4))
-        ax.hist(null_mean_f1, 30, alpha=.7, label="null μ-F1")
-        ax.axvline(obs_f1, color="red", lw=2, label=f"observed {obs_f1:.3f}")
-        ax.axvline(crit50_f1, color="brown", lw=2,
-                   label=f"50 % null ({crit50_f1:.3f})")
-        ax.axvline(crit95_f1, color="black", ls=":", lw=2,
-                   label=f"95 % null ({crit95_f1:.3f})")
-        ax.set(title=f"Gold permutation – full nested-CV (p={p_f1:.4f})",
-               xlabel="mean outer-fold F1", ylabel="count")
-        ax.legend()
-        out_png = os.path.join(self.run_directory,
-                               "gold_permutation_hist_fullnested.png")
-        fig.tight_layout()
-        fig.savefig(out_png, dpi=300)
-        plt.close()
-        print_log(f"Saved gold permutation histogram → {out_png}")
+        # Save thresholds
+        np.save(os.path.join(self.run_directory, "gold_null95_f1.npy"), crit95_f1)
+        np.save(os.path.join(self.run_directory, "gold_null50_f1.npy"), crit50_f1)
+        np.save(os.path.join(self.run_directory, "gold_null95_acc.npy"), crit95_acc)
+        np.save(os.path.join(self.run_directory, "gold_null50_acc.npy"), crit50_acc)
 
-        return dict(p_f1=p_f1, p_acc=p_acc,
-                    crit95_f1=crit95_f1, crit50_f1=crit50_f1)
+        # Plot F1 histogram
+        import matplotlib.pyplot as plt
+        fig_f1, ax_f1 = plt.subplots(figsize=(6,4))
+        ax_f1.hist(null_mean_f1, bins=30, density=True, alpha=0.7, label="null μ-F1")
+        ax_f1.axvline(obs_f1, color="red", lw=2, label=f"observed {obs_f1:.3f}")
+        ax_f1.axvline(crit50_f1, color="brown", lw=2, label=f"50% null ({crit50_f1:.3f})")
+        ax_f1.axvline(crit95_f1, color="black", ls=":", lw=2, label=f"95% null ({crit95_f1:.3f})")
+        ax_f1.set(title=f"Null F1 distribution (p={p_f1:.4f})",
+                  xlabel="mean outer-fold F1", ylabel="density")
+        ax_f1.legend(frameon=False)
+        fig_f1.tight_layout()
+        path_f1 = os.path.join(self.run_directory, "gold_perm_hist_f1.png")
+        fig_f1.savefig(path_f1, dpi=300)
+        plt.close(fig_f1)
+        print_log(f"✓ Saved F1 permutation histogram → {path_f1}")
+
+        # -------------------------------------------------------------------------
+        # Plot accuracy histogram *as density* with Binomial–PMF overlay
+        # -------------------------------------------------------------------------
+        fig_acc, ax_acc = plt.subplots(figsize=(6, 4))
+
+        # 1) permutation null as a *density* histogram
+        ax_acc.hist(
+            null_mean_acc,
+            bins=30,
+            density=True,  # ← makes area = 1
+            alpha=0.70,
+            label="null μ-accuracy (density)",
+            color="#e6550d"
+        )
+        from scipy.stats import gaussian_kde
+        # KDE curve
+        kde = gaussian_kde(null_mean_acc)
+        xs = np.linspace(null_mean_acc.min(), null_mean_acc.max(), 400)
+        ax_acc.plot(xs, kde(xs), lw=1, color="black",
+                    label="null KDE")
+        ax_acc.fill_between(xs, kde(xs), alpha=0.20, color="black")
+
+        # 2) theoretical Binomial PMF, also a density (area = 1)
+        if binom is not None:
+            p0 = 1.0 / self.top_n_labels  # chance level
+            N_total = int(sum(self.fixed_cv_results[best_name]["per_fold_n"]))
+            k = np.arange(0, N_total + 1)
+            pmf = binom.pmf(k, N_total, p0)  # already a density
+            delta = 1.0 / N_total  # step between adjacent k/N
+            pmf_dens = pmf / delta  # ← divide by Δx
+            x = k / N_total  # accuracy axis
+
+            # plot & optionally fill under the curve
+            ax_acc.plot(x, pmf_dens, '-', lw=1,
+                        label=f"Binomial PMF (p={p0:.2f})", color="#3182bd")
+            ax_acc.fill_between(x, pmf_dens, alpha=0.20, color="#9ecae1")
+
+        # 3) observed & null-percentile lines
+        ax_acc.axvline(obs_acc, color="red", lw=1,
+                       label=f"observed {obs_acc:.3f}")
+        ax_acc.axvline(crit50_acc, color="grey", lw=1,
+                       label=f"50 % null ({crit50_acc:.3f})")
+        ax_acc.axvline(crit95_acc, color="black", ls=":", lw=1,
+                       label=f"95 % null ({crit95_acc:.3f})")
+
+        # 4) axes, legend, save
+        ax_acc.set(
+            title=f"Null accuracy distribution vs. Binomial; p={p_acc:.4f}",
+            xlabel="mean outer-fold accuracy",
+            ylabel="density"  # ← density now
+        )
+        ax_acc.set_xlim(0.2, 0.8)
+        ax_acc.legend(frameon=False, loc="upper left")
+
+        fig_acc.tight_layout()
+        path_acc = os.path.join(self.run_directory, "gold_perm_hist_accuracy.png")
+        fig_acc.savefig(path_acc, dpi=300)
+        plt.close(fig_acc)
+        print_log(f"✓ Saved accuracy permutation histogram → {path_acc}")
+
+        return dict(
+            p_f1=p_f1, p_acc=p_acc,
+            crit95_f1=crit95_f1, crit50_f1=crit50_f1,
+            crit95_acc=crit95_acc, crit50_acc=crit50_acc
+        )
 
     def add_accuracy_reference_lines(self, n_classes: int,
                                      ax: plt.Axes | None = None,
@@ -3533,19 +3599,22 @@ class EEGAnalyzer:
         if n_classes not in thresh:
             raise ValueError("n_classes must be 2 or 3")
 
-        col = colors or dict(chance="grey", p05="orange", p005="purple")
+        col = colors or dict(chance="grey", p05="green", p005="purple")
 
-        ax.axhline(thresh[n_classes]["chance"],
-                   ls="--", lw=1.5, color=col["chance"],
-                   label=f"Chance ({thresh[n_classes]['chance']:.3f})")
-        ax.axhline(thresh[n_classes]["p05"],
-                   ls="--", lw=1.5, color=col["p05"],
-                   label=f"p = 0.05 ({thresh[n_classes]['p05']:.3f})")
+
+
         ax.axhline(thresh[n_classes]["p005"],
                    ls="--", lw=1.5, color=col["p005"],
                    label=f"p = 0.005 ({thresh[n_classes]['p005']:.3f})")
+        ax.axhline(thresh[n_classes]["p05"],
+                   ls="--", lw=1.5, color=col["p05"],
+                   label=f"p = 0.05 ({thresh[n_classes]['p05']:.3f})")
+        ax.axhline(thresh[n_classes]["chance"],
+                   ls="--", lw=1.5, color=col["chance"],
+                   label=f"Chance ({thresh[n_classes]['chance']:.3f})")
 
-        ax.legend(loc='center right', frameon=False, fontsize=9)
+
+        ax.legend(loc='lower right', frameon=False, fontsize=9)
 
     def evaluate_best_model(self):
         """
