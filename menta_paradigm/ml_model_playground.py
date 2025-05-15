@@ -102,7 +102,8 @@ class EEGAnalyzer:
         lmoso_leftout: int = 2,
         permu_count=1_000,
         optimize=False,
-            eval=False
+            eval=False,
+            frozen_features=12
     ):  # For holdout validation
 
         # Configuration
@@ -118,6 +119,7 @@ class EEGAnalyzer:
         self.test_size = test_size
         self.permu_count = permu_count
         self.lmoso_leftout = lmoso_leftout
+        self.frozen_features = frozen_features
 
         to_k = lambda n: (
             f"{n / 1000:.1f}k".rstrip("0").rstrip(".") if n >= 1000 else str(n)
@@ -164,6 +166,7 @@ class EEGAnalyzer:
         self.separability_scores = {}
         self.detailed_results = {}
         self.best_labels = None
+
 
     # [load_data, preprocess_data, feature_selection, and DummySelector remain unchanged]
     def load_data(self):
@@ -2608,87 +2611,112 @@ class EEGAnalyzer:
 
         fold_logs = []  # keeps the “winning model per outer fold” story
 
+        # -----------------------------------------------------------------
+        k_grid = getattr(self, "k_grid", [self.frozen_features])  # candidate #features
+        from collections import defaultdict
+        feature_score_accumulator = defaultdict(float)  # <- keep it exactly this
+
+        # -----------------------------------------------------------------
         # ─────────────────────────────────────────────────────────────────────
         # ❹  OUTER loop
         # ─────────────────────────────────────────────────────────────────────
-        from collections import defaultdict
-
-        # cumulative feature → weighted-score (will be summed across folds)
-        feature_score_accumulator = defaultdict(float)
-
-        # to keep raw per-fold info (optional, nice to inspect)
-        per_fold_feature_tables = []
-
         needs_groups_inner = isinstance(
             inner_proto, (StratifiedGroupKFold, GroupShuffleSplit, LeavePGroupsOut)
         )
-
         for f, (tr_idx, te_idx) in enumerate(outer_iter, start=1):
 
             X_tr, X_te = X_all.iloc[tr_idx], X_all.iloc[te_idx]
             y_tr, y_te = y_all.iloc[tr_idx], y_all.iloc[te_idx]
 
-            # build inner splits *once* per outer fold
-            if needs_groups_inner:
-                inner_splits = list(inner_proto.split(X_tr, y_tr, groups[tr_idx]))
-            else:
-                inner_splits = list(inner_proto.split(X_tr, y_tr))
+            # build inner splits once per outer fold
+            inner_splits = (list(inner_proto.split(X_tr, y_tr, groups[tr_idx]))
+                            if needs_groups_inner else
+                            list(inner_proto.split(X_tr, y_tr)))
 
             # -----------------------------------------------------------------
-            # 4.1  INNER loop –%score every model family
+            # 4.1  INNER loop – grid-search (model × k) on training only
             # -----------------------------------------------------------------
-            inner_mean_f1, inner_mean_acc= {}, {}
+            inner_mean_f1, inner_mean_acc = {}, {}
             for mdl_name, base_mdl in self.heuristic_models.items():
-                f1_inner, acc_inner=[],[]
-                for in_tr, in_val in inner_splits:
-                    scaler = StandardScaler().fit(X_tr.iloc[in_tr])
-                    sel = SelectKBest(f_classif, k=self.n_features_to_select).fit(
-                        scaler.transform(X_tr.iloc[in_tr]), y_tr.iloc[in_tr])
-                    X_tr_sel = sel.transform(scaler.transform(X_tr.iloc[in_tr]))
-                    X_val_sel = sel.transform(scaler.transform(X_tr.iloc[in_val]))
+                for k_feats in k_grid:
+                    f1_inner, acc_inner = [], []
 
-                    y_hat = clone(base_mdl).fit(X_tr_sel, y_tr.iloc[in_tr]).predict(X_val_sel)
-                    f1_inner.append(f1_score(y_tr.iloc[in_val], y_hat, average="macro"))
-                    acc_inner.append(accuracy_score(y_tr.iloc[in_val], y_hat))  # ← NEW
+                    for in_tr, in_val in inner_splits:
+                        scaler = StandardScaler().fit(X_tr.iloc[in_tr])
 
-                inner_mean_f1[mdl_name] = np.mean(f1_inner)
-                inner_mean_acc[mdl_name] = np.mean(acc_inner)  # ← NEW
+                        sel = SelectKBest(f_classif, k=k_feats).fit(
+                            scaler.transform(X_tr.iloc[in_tr]),
+                            y_tr.iloc[in_tr])
 
-            # pick the inner‑CV winner
-            best_name = max(inner_mean_f1, key=inner_mean_f1.get)
+                        Xtr_sel = sel.transform(scaler.transform(X_tr.iloc[in_tr]))
+                        Xval_sel = sel.transform(scaler.transform(X_tr.iloc[in_val]))
+
+                        y_hat = clone(base_mdl).fit(Xtr_sel, y_tr.iloc[in_tr]).predict(Xval_sel)
+
+                        f1_inner.append(f1_score(y_tr.iloc[in_val], y_hat, average="macro"))
+                        acc_inner.append(accuracy_score(y_tr.iloc[in_val], y_hat))
+
+                    key = (mdl_name, k_feats)  # ← unique combo
+                    inner_mean_f1[key] = np.mean(f1_inner)
+                    inner_mean_acc[key] = np.mean(acc_inner)
+
+                    # ------------------------------------------------------------------
+                    # NEW: keep a global log of inner-CV scores for each (model, k)
+                    # ------------------------------------------------------------------
+                    if not hasattr(self, "inner_grid_log"):
+                        from collections import defaultdict
+                        self.inner_grid_log = defaultdict(list)
+
+                    self.inner_grid_log["model"].append(mdl_name)
+                    self.inner_grid_log["k"].append(k_feats)
+                    self.inner_grid_log["fold"].append(f)  # outer-fold index
+                    self.inner_grid_log["inner_mean_f1"].append(inner_mean_f1[(mdl_name, k_feats)])
+                    self.inner_grid_log["inner_mean_acc"].append(inner_mean_acc[(mdl_name, k_feats)])
+
+            # choose the (model, k) that maximises inner-mean F1
+            (best_name, best_k) = max(inner_mean_f1, key=inner_mean_f1.get)
             best_model = self.heuristic_models[best_name]
 
             # -----------------------------------------------------------------
-            # 4.2  Re‑train EACH model on outer‑train, predict outer‑test
-            #      (so permutation tests can access their per‑fold predictions)
+            # 4.2  Re-train *each* model with its own best-k on outer-train,
+            #      predict outer-test so downstream code (permutation tests)
+            #      can still compare all models.
             # -----------------------------------------------------------------
             scaler_full = StandardScaler().fit(X_tr)
-            sel_full = SelectKBest(f_classif, k=self.n_features_to_select).fit(
-                scaler_full.transform(X_tr), y_tr)
-
-            X_tr_sel = sel_full.transform(scaler_full.transform(X_tr))
-            X_te_sel = sel_full.transform(scaler_full.transform(X_te))
 
             for mdl_name, base_mdl in self.heuristic_models.items():
-                y_pred = clone(base_mdl).fit(X_tr_sel, y_tr).predict(X_te_sel)
+                # If this model wasn’t the winner we still need *some* k:
+                k_star = max((k for (n, k) in inner_mean_f1 if n == mdl_name),
+                             key=lambda k: inner_mean_f1[(mdl_name, k)])
 
+                sel_full = SelectKBest(f_classif, k=k_star).fit(
+                    scaler_full.transform(X_tr), y_tr)
+
+                Xtr_sel = sel_full.transform(scaler_full.transform(X_tr))
+                Xte_sel = sel_full.transform(scaler_full.transform(X_te))
+
+                y_pred = clone(base_mdl).fit(Xtr_sel, y_tr).predict(Xte_sel)
+
+                # bookkeeping (unchanged) …
                 results[mdl_name]["per_fold_true"].append(y_te.to_numpy())
                 results[mdl_name]["per_fold_pred"].append(y_pred)
                 results[mdl_name]["per_fold_f1"].append(
-                    f1_score(y_te, y_pred, average="macro")
-                )
+                    f1_score(y_te, y_pred, average="macro"))
                 results[mdl_name]["per_fold_acc"].append(
-                    accuracy_score(y_te, y_pred)
-                )
-                results[mdl_name]["per_fold_n"].append(len(te_idx))  # ← NEW
-                results[mdl_name]["per_fold_inner_acc"].append(inner_mean_acc[mdl_name])
+                    accuracy_score(y_te, y_pred))
+                results[mdl_name]["per_fold_n"].append(len(te_idx))
+                results[mdl_name]["per_fold_inner_acc"].append(
+                    inner_mean_acc[(mdl_name, k_star)])
 
             # --------------------------------------------------------------
-            #   ①  Get the selected feature names *in this fold*
+            # ①  Feature-importance bookkeeping uses the *outer-winner*
+            #    (best_name, best_k) determined above
             # --------------------------------------------------------------
-            selected_idx = sel_full.get_support(indices=True)
-            selected_feats = [self.feature_columns[i] for i in selected_idx]
-
+            sel_full = SelectKBest(f_classif, k=best_k).fit(
+                scaler_full.transform(X_tr), y_tr)
+            X_tr_sel = sel_full.transform(scaler_full.transform(X_tr))
+            selected_feats = [self.feature_columns[i]
+                              for i in sel_full.get_support(indices=True)]
             # --------------------------------------------------------------
             #   ②  Extract importance scores for those features
             # --------------------------------------------------------------
@@ -2717,28 +2745,36 @@ class EEGAnalyzer:
             # -----------------------------------------------------------------
             outer_f1 = results[best_name]["per_fold_f1"][-1]
             print_log(f"Fold {f:02d}: best={best_name:<15}  "
-                      f"inner‑F1={inner_mean_f1[best_name]:.3f}  "
+          f"inner-F1={inner_mean_f1[(best_name, best_k)]:.3f}  "
                       f"outer‑F1={outer_f1:.3f}")
             print_log(f"Fold {f:02d} label counts: {dict(pd.Series(y_te).value_counts())}")
-
+            print_log(
+                f"k={best_k:<2} ")
             fold_logs.append(dict(
-                fold=f, best_model=best_name,
-                inner_f1=inner_mean_f1[best_name],
+                fold=f,
+                best_model=best_name,
+                best_k=best_k,
+                inner_f1=inner_mean_f1[(best_name, best_k)],
                 outer_f1=outer_f1,
                 n_test=len(te_idx),
             ))
 
-            # --------------------------------------------------------------
-            #   ③  Weight by this fold’s outer-F1 (or outer-ACC)
-            # --------------------------------------------------------------
-            weighted_importances = importances * outer_f1  # or outer_acc
 
+            # --------------------------------------------------------------
+            #   ③  Weight by this fold’s outer-F1 (or outer-ACC) -this, if used to select number of k's is a hyperparameter leakage
+            # --------------------------------------------------------------
+            # leaky_weighted_importances = importances * outer_f1  # or outer_acc
+            # --------------------------------------------------------------
+            #   ③  Weight by this fold’s iner-F1 (or outer-ACC) -insight leakage free
+            # --------------------------------------------------------------
+            inner_f1 = inner_mean_f1[(best_name, best_k)]
+            weighted_importances = importances * inner_f1
             # accumulate
             for feat, w_imp in zip(selected_feats, weighted_importances):
                 feature_score_accumulator[feat] += w_imp
 
             # keep a pretty DataFrame for optional inspection
-            # TODO REVERT, not really necessary but breaks 3-class classifiaction runs
+            # TODO REVERT, not really necessary but breaks 3-class classification runs
             # per_fold_feature_tables.append(
             #     pd.DataFrame({"feature": selected_feats,
             #                   "importance": importances,
@@ -2974,8 +3010,8 @@ class EEGAnalyzer:
         plt.figure(figsize=(8, 0.4 * TOP_N + 1))
         sns.barplot(data=agg_df.head(TOP_N),
                     y="feature", x="cum_weighted_score", orient="h")
-        plt.xlabel("∑ (importance × outer-fold F1)")
-        plt.title(f"Top {TOP_N} features across all outer folds")
+        plt.xlabel("∑ (importance × inner-fold F1)")
+        plt.title(f"Top {TOP_N} features across all outer folds weighted with inner fold accuracy")
         plt.tight_layout()
         plt.savefig(os.path.join(self.run_directory,
                                  f"feature_scores_top{TOP_N}.png"), dpi=300)
@@ -2984,12 +3020,25 @@ class EEGAnalyzer:
         print_log(f"\nWinner (fixed‑param): {self.fixed_best_model_name} "
                   f"with mean F1 = {results[self.fixed_best_model_name]['mean_f1']:.3f}")
 
+        # ------------------------------------------------------------------
+        # Save the per-(model, k, fold) grid search results
+        # ------------------------------------------------------------------
+        if hasattr(self, "inner_grid_log"):
+            import pandas as pd, os
+            grid_df = pd.DataFrame(self.inner_grid_log)
+            grid_csv = os.path.join(self.run_directory, "inner_cv_gridsearch_log.csv")
+            grid_df.to_csv(grid_csv, index=False)
+            print_log(f"✓ Saved per-model-k inner-CV scores → {grid_csv}")
+
         # ─────────────────────────────────────────────────────────────────────
         # ❼  Save a log CSV (outer‑fold winners) – optional, nice to have
         # ─────────────────────────────────────────────────────────────────────
+
         log_df = pd.DataFrame(fold_logs)
         log_csv = os.path.join(self.run_directory, "nested_full_log.csv")
         log_df.to_csv(log_csv, index=False)
+        with open (os.path.join(self.run_directory,"results.txt"), 'w') as f:
+            f.write(str(results))
         print_log(f"✓ Saved nested‑CV log → {log_csv}")
 
     # ------------------------------------------------------------
@@ -3410,6 +3459,11 @@ class EEGAnalyzer:
 
         print_log(f"\n---- GOLD permutation ({n_perm} shuffles, batch={batch}, n_jobs={n_jobs}) ----")
 
+        # ------------------------------------------------------------------
+        k_grid = getattr(self, "k_grid", [self.frozen_features])  # candidate #features
+
+        # ------------------------------------------------------------------
+
         def _one_permutation(seed: int) -> tuple[float, float]:
             rng = np.random.default_rng(seed)
             y_perm = rng.permutation(y_orig)
@@ -3421,41 +3475,51 @@ class EEGAnalyzer:
                 y_tr, y_te = y_perm[tr_idx], y_perm[te_idx]
                 g_tr = groups[tr_idx]
 
-                # inner splitter
+                # ---------- build inner splitter *once* for this outer fold ----------
                 if self.cv_method == "loo":
-                    inner_cv = StratifiedKFold(n_splits=min(3, len(X_tr)-1),
+                    inner_cv = StratifiedKFold(n_splits=min(3, len(X_tr) - 1),
                                                shuffle=True, random_state=24)
                     inner_split = lambda X, y: inner_cv.split(X, y)
                 else:
                     proto = inner_proto_template
                     needs_g = isinstance(proto, (StratifiedGroupKFold,
-                                                 GroupShuffleSplit, LeavePGroupsOut))
+                                                 GroupShuffleSplit,
+                                                 LeavePGroupsOut))
                     inner_split = (lambda X, y: proto.split(X, y, g_tr)
-                                   if needs_g else lambda X, y: proto.split(X, y))
+                    if needs_g else lambda X, y: proto.split(X, y))
 
-                # model selection by inner CV
+                # ---------- inner loop: score every (model, k) combination ----------
                 inner_mean_f1 = {}
                 for mdl_name, base_mdl in self.heuristic_models.items():
-                    scores = []
-                    for in_tr, in_val in inner_split(X_tr, y_tr):
-                        scaler = StandardScaler().fit(X_tr.iloc[in_tr])
-                        sel = SelectKBest(f_classif, k=self.n_features_to_select).fit(
-                            scaler.transform(X_tr.iloc[in_tr]), y_tr[in_tr])
-                        Xtr_sel = sel.transform(scaler.transform(X_tr.iloc[in_tr]))
-                        Xval_sel = sel.transform(scaler.transform(X_tr.iloc[in_val]))
-                        y_hat = clone(base_mdl).fit(Xtr_sel, y_tr[in_tr]).predict(Xval_sel)
-                        scores.append(f1_score(y_tr[in_val], y_hat, average="macro"))
-                    inner_mean_f1[mdl_name] = float(np.mean(scores))
+                    for k_feats in k_grid:
+                        scores = []
+                        for in_tr, in_val in inner_split(X_tr, y_tr):
+                            scaler = StandardScaler().fit(X_tr.iloc[in_tr])
 
-                winner = max(inner_mean_f1, key=inner_mean_f1.get)
-                win_mdl = self.heuristic_models[winner]
+                            sel = SelectKBest(f_classif, k=k_feats).fit(
+                                scaler.transform(X_tr.iloc[in_tr]),
+                                y_tr[in_tr])
 
-                # retrain and predict on outer test
+                            Xtr_sel = sel.transform(scaler.transform(X_tr.iloc[in_tr]))
+                            Xval_sel = sel.transform(scaler.transform(X_tr.iloc[in_val]))
+
+                            y_hat = clone(base_mdl).fit(Xtr_sel, y_tr[in_tr]).predict(Xval_sel)
+                            scores.append(f1_score(y_tr[in_val], y_hat, average="macro"))
+
+                        inner_mean_f1[(mdl_name, k_feats)] = float(np.mean(scores))
+
+                # winner = model–k pair with best inner F1
+                (winner_name, winner_k) = max(inner_mean_f1, key=inner_mean_f1.get)
+                win_mdl = self.heuristic_models[winner_name]
+
+                # ---------- retrain winner on full outer-train, test on outer-test ----------
                 scaler_full = StandardScaler().fit(X_tr)
-                sel_full = SelectKBest(f_classif, k=self.n_features_to_select).fit(
+                sel_full = SelectKBest(f_classif, k=winner_k).fit(
                     scaler_full.transform(X_tr), y_tr)
+
                 Xtr_sel = sel_full.transform(scaler_full.transform(X_tr))
                 Xte_sel = sel_full.transform(scaler_full.transform(X_te))
+
                 y_pred = clone(win_mdl).fit(Xtr_sel, y_tr).predict(Xte_sel)
 
                 f1_per_fold.append(f1_score(y_te, y_pred, average="macro"))
@@ -3465,7 +3529,6 @@ class EEGAnalyzer:
             w = np.asarray(sizes, float)
             return (float(np.average(f1_per_fold, weights=w)),
                     float(np.average(acc_per_fold, weights=w)))
-
         # Parallel shuffle
         seeds = rng_master.integers(0, 2**32-1, size=n_perm)
         null_f1, null_acc = [], []
@@ -4016,6 +4079,12 @@ if __name__ == "__main__":
         default=1000,
         help="Number of permutations to run optimization (default: 1k)",
     )
+    parser.add_argument(
+        "--frozen_features",
+        type=int,
+        default=None,
+        help="Pass it to freeze features to a number of features (default: unfrozen, k=[2,3,5,10,15]"
+    )
 
     args = parser.parse_args()
 
@@ -4032,6 +4101,7 @@ if __name__ == "__main__":
         lmoso_leftout=args.lmoso_leftout,
         optimize=args.optimize,
         eval=args.eval,
+        frozen_features=args.frozen_features,
     )
 
     analyzer.run_complete_analysis(
