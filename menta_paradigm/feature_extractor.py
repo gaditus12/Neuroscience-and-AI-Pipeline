@@ -243,7 +243,7 @@ def feat_sample_entropy(signal, sfreq=None, m=2, r_ratio=0.2):
         return nolds.sampen(signal, emb_dim=m, tolerance=r)
     except Exception:
         # nolds missing or sampen failed (too short, all-zeros, etc.)
-        return np.nan
+        raise ModuleNotFoundError
 
 
 
