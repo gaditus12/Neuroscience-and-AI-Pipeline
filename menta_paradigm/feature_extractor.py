@@ -222,9 +222,29 @@ def feat_spectral_edge(signal, sfreq, edge=0.95):
 
 
 # --- Nonlinear Features ---
-def feat_sample_entropy(signal, sfreq=None):
-    # Placeholder for sample entropy – replace with a robust implementation.
-    return np.log(np.std(signal) + 1e-10)
+# ---------- Genuine Sample Entropy ----------
+def feat_sample_entropy(signal, sfreq=None, m=2, r_ratio=0.2):
+    """
+    Sample Entropy (Richman & Moorman, 2000).
+
+    Parameters
+    ----------
+    signal : 1-D numpy array
+    m      : embedding dimension (default 2)
+    r_ratio: tolerance as a fraction of the signal's SD (default 0.20)
+
+    Returns
+    -------
+    SampEn value or np.nan on error.
+    """
+    try:
+        import nolds                      # lightweight dependency
+        r = r_ratio * np.std(signal)
+        return nolds.sampen(signal, emb_dim=m, tolerance=r)
+    except Exception:
+        # nolds missing or sampen failed (too short, all-zeros, etc.)
+        return np.nan
+
 
 
 def feat_permutation_entropy(signal, sfreq, order=3):
@@ -320,7 +340,7 @@ def feat_lempel_ziv(signal, sfreq=None):
 # --- Additional Features for Visual Imagery Classification ---
 
 # Phase-Based Features
-def feat_phase_locking_value(signal, sfreq, band=(8, 13)):
+def feat_self_phase_locking_value(signal, sfreq, band=(8, 13)):
     """
     Calculate the phase locking value in the alpha band between consecutive windows.
 
@@ -439,7 +459,7 @@ def feat_wavelet_complexity(signal, sfreq):
 
 
 # Functional Connectivity Measures
-def feat_signal_coherence(signal, sfreq, band=(8, 13)):
+def feat_self_signal_coherence(signal, sfreq, band=(8, 13)):
     """
     Calculate mean coherence across signal segments.
 
@@ -474,11 +494,11 @@ def feat_signal_coherence(signal, sfreq, band=(8, 13)):
 
 
 # Dynamic Connectivity
-def feat_dynamic_connectivity_variance(signal, sfreq, band=(8, 13)):
+def feat_self_coherence_variance(signal, sfreq, band=(8, 13)):
     """
-    Calculate the variance of connectivity over time.
+    Calculate the variance of self coherence
 
-    This measures how stable the connectivity patterns are, which may differ during visual imagery.
+    This measures how stable the coherence patterns are, which may differ during visual imagery.
     """
     from scipy.signal import coherence
 
@@ -599,7 +619,7 @@ def feat_energy_ratio(signal, sfreq):
 
 
 # EEG microstate features (simplified version)
-def feat_microstate_variance(signal, sfreq):
+def feat_proxy_microstate_variance(signal, sfreq):
     """
     Calculate a simplified measure of EEG microstate variability.
 
@@ -677,17 +697,17 @@ def register_all_features(extractor):
     extractor.register_feature('lempel_ziv', feat_lempel_ziv)
 
     # Register New Visual Imagery Specific Features
-    extractor.register_feature('phase_locking_value', feat_phase_locking_value)
+    extractor.register_feature('self_phase_locking_value', feat_self_phase_locking_value)
     extractor.register_feature('alpha_peak_freq', feat_alpha_peak_frequency)
     extractor.register_feature('ind_alpha_power', feat_individual_alpha_power)
     extractor.register_feature('wavelet_complexity', feat_wavelet_complexity)
-    extractor.register_feature('signal_coherence', feat_signal_coherence)
-    extractor.register_feature('dyn_conn_variance', feat_dynamic_connectivity_variance)
-    extractor.register_feature('psd_gamma_low', feat_psd_gamma_low)
-    extractor.register_feature('psd_gamma_high', feat_psd_gamma_high)
+    extractor.register_feature('self_coherence', feat_self_signal_coherence)
+    extractor.register_feature('self_coherence_variance', feat_self_coherence_variance)
+    # extractor.register_feature('psd_gamma_low', feat_psd_gamma_low) >30Hz /canceled out in our freq. spectrum
+    # extractor.register_feature('psd_gamma_high', feat_psd_gamma_high) >30Hz /canceled out in our freq. spectrum
     extractor.register_feature('dfa', feat_dfa)
     extractor.register_feature('energy_ratio', feat_energy_ratio)
-    extractor.register_feature('microstate_var', feat_microstate_variance)
+    extractor.register_feature('proxy_microstate_var', feat_proxy_microstate_variance)
 
 # ---------------------------
 # Function to process a single file
