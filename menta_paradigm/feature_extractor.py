@@ -4,12 +4,14 @@ import numpy as np
 import mne
 import time
 import argparse
+import nolds
 from tqdm import tqdm
 from scipy.stats import skew, kurtosis, entropy
 from mne.time_frequency import psd_array_welch
 import math
 from pywt import wavedec
-
+from scipy.signal import hilbert
+from scipy.signal import coherence
 
 # ---------------------------
 # EEG Feature Extractor Class
@@ -237,13 +239,9 @@ def feat_sample_entropy(signal, sfreq=None, m=2, r_ratio=0.2):
     -------
     SampEn value or np.nan on error.
     """
-    try:
-        import nolds                      # lightweight dependency
-        r = r_ratio * np.std(signal)
-        return nolds.sampen(signal, emb_dim=m, tolerance=r)
-    except Exception:
-        # nolds missing or sampen failed (too short, all-zeros, etc.)
-        raise ModuleNotFoundError
+    r = r_ratio * np.std(signal)
+    return nolds.sampen(signal, emb_dim=m, tolerance=r)
+
 
 
 
@@ -346,7 +344,6 @@ def feat_self_phase_locking_value(signal, sfreq, band=(8, 13)):
 
     Alpha band phase synchrony is often related to visual processing.
     """
-    from scipy.signal import hilbert
 
     # Band-pass filter the signal
     filtered_signal = mne.filter.filter_data(
@@ -465,7 +462,6 @@ def feat_self_signal_coherence(signal, sfreq, band=(8, 13)):
 
     Coherence measures can help identify connectivity patterns relevant for visual imagery.
     """
-    from scipy.signal import coherence
 
     # Split signal into segments
     win_size = int(2 * sfreq)  # 2-second windows
@@ -500,7 +496,6 @@ def feat_self_coherence_variance(signal, sfreq, band=(8, 13)):
 
     This measures how stable the coherence patterns are, which may differ during visual imagery.
     """
-    from scipy.signal import coherence
 
     # Split signal into segments
     win_size = int(2 * sfreq)  # 2-second windows
