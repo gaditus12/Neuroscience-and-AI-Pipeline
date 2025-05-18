@@ -12,6 +12,8 @@ import math
 from pywt import wavedec
 from scipy.signal import hilbert
 from scipy.signal import coherence
+import antropy as ant
+
 
 # ---------------------------
 # EEG Feature Extractor Class
@@ -224,26 +226,27 @@ def feat_spectral_edge(signal, sfreq, edge=0.95):
 
 
 # --- Nonlinear Features ---
-# ---------- Genuine Sample Entropy ----------
-def feat_sample_entropy(signal, sfreq=None, m=2, r_ratio=0.2):
+# ---------- Fast Sample Entropy (robust version) ----------
+def feat_sample_entropy(signal,
+                        sfreq=None,
+                        r_ratio: float = 0.20,
+                        decim: int = 2):
     """
-    Sample Entropy (Richman & Moorman, 2000).
-
-    Parameters
-    ----------
-    signal : 1-D numpy array
-    m      : embedding dimension (default 2)
-    r_ratio: tolerance as a fraction of the signal's SD (default 0.20)
-
-    Returns
-    -------
-    SampEn value or np.nan on error.
+    Sample Entropy (Richman & Moorman, 2000) with light decimation.
+    Uses antropy; bypasses Numba path to avoid type-mismatch error.
     """
-    r = r_ratio * np.std(signal)
-    return nolds.sampen(signal, emb_dim=m, tolerance=r)
+    # 1) Optional down-sampling (safe after your 1–30 Hz filter)
+    sig = signal if decim <= 1 else signal[::decim]
 
-
-
+    # 2) Compute SampEn (order = 2) with Euclidean distance
+    tol = r_ratio * np.std(sig)
+    try:
+        return ant.sample_entropy(sig,
+                                  order=2,
+                                  metric="euclidean",  # avoids Numba bug
+                                  tolerance=tol)
+    except Exception:
+        raise "Error extracting sample entropy"
 
 def feat_permutation_entropy(signal, sfreq, order=3):
     n = len(signal)
