@@ -102,13 +102,18 @@ class EEGAnalyzer:
         lmoso_leftout: int = 2,
         permu_count=1_000,
         optimize=False,
-            eval=False,
-            frozen_features=12
+        eval=False,
+        frozen_features=None,
+        run_directory=None
     ):  # For holdout validation
 
         # Configuration
+        if frozen_features is None:
+            frozen_features = [2,3,5,10,15]
+        else:
+            frozen_features = [frozen_features]
         self.features_file = (
-            "data/final_sets/all_channels_binary/no_leak/" + features_file + ".csv"
+            "data/final_sets/all_channels_binary/no_leak/final_final_set/" + features_file + ".csv"
         )
         self.top_n_labels = top_n_labels
         self.n_features_to_select = n_features_to_select
@@ -121,32 +126,46 @@ class EEGAnalyzer:
         self.lmoso_leftout = lmoso_leftout
         self.frozen_features = frozen_features
 
+        # helper to render 1000→"1k"
         to_k = lambda n: (
-            f"{n / 1000:.1f}k".rstrip("0").rstrip(".") if n >= 1000 else str(n)
+            f"{n / 1000:.1f}k".rstrip("0").rstrip(".")
+            if n >= 1000 else str(n)
         )
-        permu_count = to_k(permu_count)
-        channel_normalization = features_file.split("/")[-1].split(".")[0]
-        # Create a unique directory for this run
-        timestamp = int(time.time())
+        permu_str = to_k(self.permu_count)
 
-        if eval:
-            self.run_directory = os.path.join(
-                "ml_model_outputs",
-                f"EVAL_{channel_normalization}_samp_weig_gold-shuffle_{cv_method}_{permu_count}_{n_features_to_select}feat_run_{timestamp}",
-            )
+        ts = int(time.time())
+        channel_norm = features_file.split("/")[-1].split(".")[0]
+        ff=self.frozen_features[0]
 
-        elif not optimize:
-            self.run_directory = os.path.join(
-                "ml_model_outputs",
-                f"samp_weig_gold-shuffle_{channel_normalization}_{cv_method}_{permu_count}_{n_features_to_select}feat_run_{timestamp}",
+        dirname = (
+            f"[{channel_norm}]_"
+            f"[{self.cv_method}]_[{permu_str}perm]_"
+            f"[{ff}feat]_"
+            f"run_{ts}"
+        )
+        # --- new run_directory logic ---
+        if run_directory:
+            # user specified hierarchy ⇒ trust it
+            self.run_directory = os.path.join(run_directory, dirname)
+        else:
+            # fallback to your old timestamp‐based naming
+            if eval:
+                tag = "EVAL"
+            elif optimize:
+                tag = "optimize"
+            else:
+                tag = "standard"
+            dirname = (
+                f"{tag}_[{channel_norm}]_"
+                f"[{self.cv_method}]_[{permu_str}perm]_"
+                f"[{ff}feat]_"
+                f"run_{ts}"
             )
-        elif optimize:
-            self.run_directory = os.path.join(
-                "ml_model_outputs",
-                f"samp_weig_o&g-shuffle_{channel_normalization}_{cv_method}_{permu_count}_{n_features_to_select}feat_run_{timestamp}",
-            )
+            self.run_directory = os.path.join("ml_model_outputs", dirname)
+
         os.makedirs(self.run_directory, exist_ok=True)
-        with open(f"{self.run_directory}/features_file.txt", "w") as f:
+        # dump the features file
+        with open(os.path.join(self.run_directory, "features_file.txt"), "w") as f:
             f.write(self.features_file)
 
         self.heuristic_models=self._default_heuristic_models()
@@ -2026,77 +2045,77 @@ class EEGAnalyzer:
                 "model__class_weight": Categorical(["balanced"]),
                 "feature_selection__k": Integer(3, 20), #3, 20
             },
-            # ──────────────────────────────────────────────────────────────   SVM  ──
-            "SVM": {
-                "model": Categorical([SVC(random_state=42, probability=True)]),
-                "model__kernel": Categorical(["linear", "rbf", "poly"]),  # poly removed
-                "model__C": Real(1e-2, 5.0, prior="log-uniform"),
-                "model__gamma": Real(1e-4, 5e-2, prior="log-uniform"),
-                "model__class_weight": Categorical(["balanced", None]),
-                "feature_selection__k": Integer(3, 20),
-            },
-            # # ─────────────────────────────────────────── Elastic‑Net Logistic Reg ──
-            "ElasticNetLogReg": {
-                "model": Categorical(
-                    [
-                        LogisticRegression(
-                            penalty="elasticnet",
-                            solver="saga",
-                            class_weight="balanced",
-                            max_iter=4000,
-                            random_state=42,
-                        )
-                    ]
-                ),
-                "model__C": Real(1e-2, 5.0, prior="log-uniform"),
-                "model__l1_ratio": Real(0.1, 0.9),  # avoid extremes
-                "feature_selection__k": Integer(3, 20),
-            },
-            # ───────────────────────────────────────────────────────── Extra Trees ──
-            "ExtraTrees": {
-                "model": Categorical(
-                    [
-                        ExtraTreesClassifier(
-                            class_weight="balanced", random_state=42, n_jobs=-1
-                        )
-                    ]
-                ),
-                "model__n_estimators": Integer(80, 200),
-                "model__max_depth": Integer(2, 8),
-                "model__min_samples_leaf": Integer(2, 6),
-                "feature_selection__k": Integer(3, 20),
-            },
-            # # ────────────────────────────────────────── HistGradientBoosting ──
-            "HGBClassifier": {
-                "model": Categorical(
-                    [
-                        HistGradientBoostingClassifier(
-                            class_weight="balanced", random_state=42
-                        )
-                    ]
-                ),
-                "model__learning_rate": Real(0.02, 0.12, prior="log-uniform"),
-                "model__max_depth": Integer(2, 4),
-                "model__max_iter": Integer(60, 100),
-                "feature_selection__k": Integer(3, 20),
-            },
-            # # ───────────────────────────────────────────────────── k‑Nearest Nbrs ──
-            "kNN": {
-                "model": Categorical([KNeighborsClassifier()]),
-                "model__n_neighbors": Integer(5, 15),  # ≥5 to limit variance
-                "model__weights": Categorical(["uniform", "distance"]),
-                "feature_selection__k": Integer(3, 20),
-            },
-            # # ────────────────────────────────────────────── Gaussian Naïve Bayes ──
-            "GaussianNB": {
-                "model": Categorical([GaussianNB()])
-                # no hyper‑params
-            },
-            # # ────────────────────────────────────────────── Shrinkage LDA ──
-            "ShrinkageLDA": {
-                "model": Categorical([LinearDiscriminantAnalysis(solver="lsqr")]),
-                "model__shrinkage": Categorical(["auto", 0.1, 0.3, None]),
-            },
+            # # ──────────────────────────────────────────────────────────────   SVM  ──
+            # "SVM": {
+            #     "model": Categorical([SVC(random_state=42, probability=True)]),
+            #     "model__kernel": Categorical(["linear", "rbf", "poly"]),  # poly removed
+            #     "model__C": Real(1e-2, 5.0, prior="log-uniform"),
+            #     "model__gamma": Real(1e-4, 5e-2, prior="log-uniform"),
+            #     "model__class_weight": Categorical(["balanced", None]),
+            #     "feature_selection__k": Integer(3, 20),
+            # },
+            # # # ─────────────────────────────────────────── Elastic‑Net Logistic Reg ──
+            # "ElasticNetLogReg": {
+            #     "model": Categorical(
+            #         [
+            #             LogisticRegression(
+            #                 penalty="elasticnet",
+            #                 solver="saga",
+            #                 class_weight="balanced",
+            #                 max_iter=4000,
+            #                 random_state=42,
+            #             )
+            #         ]
+            #     ),
+            #     "model__C": Real(1e-2, 5.0, prior="log-uniform"),
+            #     "model__l1_ratio": Real(0.1, 0.9),  # avoid extremes
+            #     "feature_selection__k": Integer(3, 20),
+            # },
+            # # ───────────────────────────────────────────────────────── Extra Trees ──
+            # "ExtraTrees": {
+            #     "model": Categorical(
+            #         [
+            #             ExtraTreesClassifier(
+            #                 class_weight="balanced", random_state=42, n_jobs=-1
+            #             )
+            #         ]
+            #     ),
+            #     "model__n_estimators": Integer(80, 200),
+            #     "model__max_depth": Integer(2, 8),
+            #     "model__min_samples_leaf": Integer(2, 6),
+            #     "feature_selection__k": Integer(3, 20),
+            # },
+            # # # ────────────────────────────────────────── HistGradientBoosting ──
+            # "HGBClassifier": {
+            #     "model": Categorical(
+            #         [
+            #             HistGradientBoostingClassifier(
+            #                 class_weight="balanced", random_state=42
+            #             )
+            #         ]
+            #     ),
+            #     "model__learning_rate": Real(0.02, 0.12, prior="log-uniform"),
+            #     "model__max_depth": Integer(2, 4),
+            #     "model__max_iter": Integer(60, 100),
+            #     "feature_selection__k": Integer(3, 20),
+            # },
+            # # # ───────────────────────────────────────────────────── k‑Nearest Nbrs ──
+            # "kNN": {
+            #     "model": Categorical([KNeighborsClassifier()]),
+            #     "model__n_neighbors": Integer(5, 15),  # ≥5 to limit variance
+            #     "model__weights": Categorical(["uniform", "distance"]),
+            #     "feature_selection__k": Integer(3, 20),
+            # },
+            # # # ────────────────────────────────────────────── Gaussian Naïve Bayes ──
+            # "GaussianNB": {
+            #     "model": Categorical([GaussianNB()])
+            #     # no hyper‑params
+            # },
+            # # # ────────────────────────────────────────────── Shrinkage LDA ──
+            # "ShrinkageLDA": {
+            #     "model": Categorical([LinearDiscriminantAnalysis(solver="lsqr")]),
+            #     "model__shrinkage": Categorical(["auto", 0.1, 0.3, None]),
+            # },
         }
         return search_spaces
 
@@ -2568,8 +2587,8 @@ class EEGAnalyzer:
         # ❶  Sanity checks & data subsets
         # ─────────────────────────────────────────────────────────────────────
         if self.best_labels is None:
-            raise RuntimeError("Call evaluate_label_combinations() first")
-
+            print_log("sticking to the base labels m_et_s and n_3_s since best labels were not computed")
+            self.best_labels=('m_et_s', 'n_3_s')
         df_best = self.df[self.df["label"].isin(self.best_labels)].reset_index(drop=True)
         X_all = df_best[self.feature_columns]
         y_all = df_best["label"]
@@ -2605,16 +2624,16 @@ class EEGAnalyzer:
             self.heuristic_models = self._default_heuristic_models()  # helper
 
         results = {
-            m: dict(per_fold_true=[], per_fold_pred=[], per_fold_f1=[], per_fold_acc=[], per_fold_n=[], per_fold_inner_acc=[])
+            m: dict(per_fold_true=[], per_fold_pred=[], per_fold_f1=[], per_fold_acc=[], per_fold_n=[], per_fold_inner_acc=[], per_fold_inner_f1=[])
             for m in self.heuristic_models
         }
 
         fold_logs = []  # keeps the “winning model per outer fold” story
 
         # -----------------------------------------------------------------
-        k_grid = getattr(self, "k_grid", [self.frozen_features])  # candidate #features
+        k_grid = getattr(self, "k_grid", self.frozen_features)  # candidate #features
         from collections import defaultdict
-        feature_score_accumulator = defaultdict(float)  # <- keep it exactly this
+        feature_score_accumulator, leaky_feature_score_accumulator = defaultdict(float),defaultdict(float)
 
         # -----------------------------------------------------------------
         # ─────────────────────────────────────────────────────────────────────
@@ -2707,6 +2726,8 @@ class EEGAnalyzer:
                 results[mdl_name]["per_fold_n"].append(len(te_idx))
                 results[mdl_name]["per_fold_inner_acc"].append(
                     inner_mean_acc[(mdl_name, k_star)])
+                results[mdl_name]["per_fold_inner_f1"].append(
+                    inner_mean_f1[(mdl_name, k_star)])
 
             # --------------------------------------------------------------
             # ①  Feature-importance bookkeeping uses the *outer-winner*
@@ -2769,9 +2790,14 @@ class EEGAnalyzer:
             # --------------------------------------------------------------
             inner_f1 = inner_mean_f1[(best_name, best_k)]
             weighted_importances = importances * inner_f1
+            leaky_weighted_importances= importances * outer_f1
             # accumulate
             for feat, w_imp in zip(selected_feats, weighted_importances):
                 feature_score_accumulator[feat] += w_imp
+            # accumulate leaky importances
+            for feat, leaky_w_imp in zip(selected_feats, leaky_weighted_importances):
+                leaky_feature_score_accumulator[feat] += leaky_w_imp
+
 
             # keep a pretty DataFrame for optional inspection
             # TODO REVERT, not really necessary but breaks 3-class classification runs
@@ -2793,10 +2819,19 @@ class EEGAnalyzer:
             w = np.asarray(rec["per_fold_n"], dtype=float)
             rec["mean_f1"] = float(np.average(rec["per_fold_f1"], weights=w))
             rec["mean_acc"] = float(np.average(rec["per_fold_acc"], weights=w))
-
+            rec["inner_mean_f1"] = float(np.average(rec["per_fold_inner_f1"], weights=w))
         # store & expose the familiar objects
         self.fixed_cv_results = results
-        self.fixed_best_model_name = max(results, key=lambda m: results[m]["mean_f1"])
+        # this is a bad bad bad issue, that's why we no longer run the test
+        # with multiple classifiers, this picks the best outer, which is a post-hoc
+        # evaluation, this is INVALID
+        # TODO we don't need to change this but we should not use anything from here to report
+        # which means it is still fine to do it per model, but not aggregated
+        # self.fixed_best_model_name = max(results, key=lambda m: results[m]["mean_f1"])
+        # now fixed, we choose the inner f1 winner but it is not weighted correctly, so still do not use it for multiple classifiers
+        self.fixed_best_model_name = max(results, key=lambda m: results[m]["inner_mean_f1"])
+
+
 
         # ---------------------------------------------------------------------------
         # Pretty plots of the CV results
@@ -2859,11 +2894,13 @@ class EEGAnalyzer:
             ax.set_ylabel("Outer-fold accuracy")
             ax.set_xlabel("")
             ax.set_xticklabels(ax.get_xticklabels(), rotation=30, ha="right")
-            ax.set_title(f"Outer-fold accuracies per model with {self.cv_method} cross validation")
+            ax.set_title(f"Outer-fold accuracies (not sample weighted) per model with {self.cv_method} cross validation")
+            ax.axhline(y=0.5, linestyle="--", color="black")
             import matplotlib.patches as mpatches
             green_patch = mpatches.Patch(color='green', label='Significant Accuracy (p<0.05)')
             yellow_patch = mpatches.Patch(color='yellow', label='Trend (0.05<p<0.1)')
             grey_patch = mpatches.Patch(color='grey', label='Not Significant or Trend (p>0.1)')
+
             # 2) Pass them into legend via the handles kwarg:
             ax.legend(handles=[green_patch, yellow_patch, grey_patch],
                       loc='lower right',
@@ -2917,6 +2954,8 @@ class EEGAnalyzer:
 
             inner_stats = pd.DataFrame({
                 "inner_mean_acc": {m: np.mean(rec["per_fold_inner_acc"])
+                                   for m, rec in results.items()},
+                "inner_mean_f1": {m: np.mean(rec["per_fold_inner_f1"])
                                    for m, rec in results.items()},
                 "inner_sd": {m: np.std(rec["per_fold_inner_acc"], ddof=1)
                              for m, rec in results.items()}
@@ -2991,7 +3030,7 @@ class EEGAnalyzer:
         self.fixed_best_model = clone(best_base).fit(X_all_sel, y_all)
 
         # --------------------------------------------------------------
-        # ❺  Aggregate weighted scores across folds
+        # ❺  Aggregate weighted scores across folds weighted by inner fold accuracies (no heuristic leakage)
         # --------------------------------------------------------------
         agg_df = (
             pd.DataFrame.from_dict(feature_score_accumulator, orient="index",
@@ -3011,11 +3050,45 @@ class EEGAnalyzer:
         sns.barplot(data=agg_df.head(TOP_N),
                     y="feature", x="cum_weighted_score", orient="h")
         plt.xlabel("∑ (importance × inner-fold F1)")
-        plt.title(f"Top {TOP_N} features across all outer folds weighted with inner fold accuracy")
+        plt.title(f"Top {TOP_N} features across all outer folds weighted with INNER fold accuracy (no heuristic leakage)")
         plt.tight_layout()
         plt.savefig(os.path.join(self.run_directory,
                                  f"feature_scores_top{TOP_N}.png"), dpi=300)
         plt.close()
+
+        # --------------------------------------------------------------
+        # ❺  Aggregate weighted scores across folds weighted by OUTER fold accuracies (heuristic leakage)
+        # --------------------------------------------------------------
+        agg_df = (
+            pd.DataFrame.from_dict(leaky_feature_score_accumulator, orient="index",
+                                   columns=["cum_weighted_score"])
+            .sort_values("cum_weighted_score", ascending=False)
+            .reset_index()
+            .rename(columns={"index": "feature"})
+        )
+
+        out_csv = os.path.join(self.run_directory, "leaky_crossval_feature_scores.csv")
+        agg_df.to_csv(out_csv, index=False)
+        print_log(f"✓ Saved leaky cross-validated feature scores (only for post-hoc insights) → {out_csv}")
+
+        # optional bar-plot of top-N
+        TOP_N = 25
+        plt.figure(figsize=(8, 0.4 * TOP_N + 1))
+        sns.barplot(data=agg_df.head(TOP_N),
+                    y="feature", x="cum_weighted_score", orient="h")
+        plt.xlabel("∑ (importance × OUTER-fold F1)")
+        plt.title(f"Top {TOP_N} features across all outer folds weighted with OUTER fold accuracy (post-hoc only)")
+        plt.tight_layout()
+        plt.savefig(os.path.join(self.run_directory,
+                                 f"leaky_feature_scores_top{TOP_N}.png"), dpi=300)
+        plt.close()
+
+
+
+
+
+
+
 
         print_log(f"\nWinner (fixed‑param): {self.fixed_best_model_name} "
                   f"with mean F1 = {results[self.fixed_best_model_name]['mean_f1']:.3f}")
@@ -3438,6 +3511,7 @@ class EEGAnalyzer:
         rng_master = np.random.default_rng(random_state)
 
         # Data restricted to winning label set
+        # labels are predefined so this is not relevant, these did not 'win' anyting as there is only 2 labels passed to binary classifiers
         df_best = self.df[self.df["label"].isin(self.best_labels)].reset_index(drop=True)
         X_all = df_best[self.feature_columns]
         y_orig = df_best["label"].to_numpy()
@@ -3460,7 +3534,7 @@ class EEGAnalyzer:
         print_log(f"\n---- GOLD permutation ({n_perm} shuffles, batch={batch}, n_jobs={n_jobs}) ----")
 
         # ------------------------------------------------------------------
-        k_grid = getattr(self, "k_grid", [self.frozen_features])  # candidate #features
+        k_grid = getattr(self, "k_grid", self.frozen_features)  # candidate #features
 
         # ------------------------------------------------------------------
 
@@ -3546,19 +3620,21 @@ class EEGAnalyzer:
         # p-values & thresholds
         p_f1 = (np.sum(null_mean_f1 >= obs_f1) + 1) / (n_perm + 1)
         p_acc = (np.sum(null_mean_acc >= obs_acc) + 1) / (n_perm + 1)
-        crit95_f1, crit50_f1 = np.percentile(null_mean_f1, [95, 50]).astype(float)
-        crit95_acc, crit50_acc = np.percentile(null_mean_acc, [95, 50]).astype(float)
+        crit99_f1, crit95_f1, crit50_f1 = np.percentile(null_mean_f1, [99, 95, 50]).astype(float)
+        crit99_acc, crit95_acc, crit50_acc = np.percentile(null_mean_acc, [99, 95, 50]).astype(float)
 
         # Save thresholds
+        np.save(os.path.join(self.run_directory, "gold_null99_f1.npy"), crit99_f1)
         np.save(os.path.join(self.run_directory, "gold_null95_f1.npy"), crit95_f1)
         np.save(os.path.join(self.run_directory, "gold_null50_f1.npy"), crit50_f1)
+        np.save(os.path.join(self.run_directory, "gold_null99_acc.npy"), crit99_acc)
         np.save(os.path.join(self.run_directory, "gold_null95_acc.npy"), crit95_acc)
         np.save(os.path.join(self.run_directory, "gold_null50_acc.npy"), crit50_acc)
 
         # Plot F1 histogram
         import matplotlib.pyplot as plt
         fig_f1, ax_f1 = plt.subplots(figsize=(6,4))
-        ax_f1.hist(null_mean_f1, bins=30, density=True, alpha=0.7, label="null μ-F1")
+        ax_f1.hist(null_mean_f1, bins=75, density=True, alpha=0.7, label="null μ-F1")
         ax_f1.axvline(obs_f1, color="red", lw=2, label=f"observed {obs_f1:.3f}")
         ax_f1.axvline(crit50_f1, color="brown", lw=2, label=f"50% null ({crit50_f1:.3f})")
         ax_f1.axvline(crit95_f1, color="black", ls=":", lw=2, label=f"95% null ({crit95_f1:.3f})")
@@ -3579,7 +3655,7 @@ class EEGAnalyzer:
         # 1) permutation null as a *density* histogram
         ax_acc.hist(
             null_mean_acc,
-            bins=30,
+            bins=50,
             density=True,  # ← makes area = 1
             alpha=0.70,
             label="null μ-accuracy (density)",
@@ -3613,8 +3689,10 @@ class EEGAnalyzer:
                        label=f"observed {obs_acc:.3f}")
         ax_acc.axvline(crit50_acc, color="grey", lw=1,
                        label=f"50 % null ({crit50_acc:.3f})")
-        ax_acc.axvline(crit95_acc, color="black", ls=":", lw=1,
+        ax_acc.axvline(crit95_acc, color="green", lw=1,
                        label=f"95 % null ({crit95_acc:.3f})")
+        ax_acc.axvline(crit99_acc, color="purple", lw=1,
+                       label=f"99 % null ({crit99_acc:.3f})")
 
         # 4) axes, legend, save
         ax_acc.set(
@@ -3622,7 +3700,7 @@ class EEGAnalyzer:
             xlabel="mean outer-fold accuracy",
             ylabel="density"  # ← density now
         )
-        ax_acc.set_xlim(0.2, 0.8)
+        ax_acc.set_xlim(0.3, 0.7)
         ax_acc.legend(frameon=False, loc="upper left")
 
         fig_acc.tight_layout()
@@ -3656,19 +3734,19 @@ class EEGAnalyzer:
 
         # -------------------- thresholds for your sample sizes -------------------
         thresh = {
-            2: dict(chance=0.50, p05=0.585, p005=0.625),  # n = 118
-            3: dict(chance=1 / 3, p05=0.404, p005=0.435),  # n = 161
+            2: dict(chance=0.50, p05=0.585, p01=0.617),  # n = 120
+            3: dict(chance=1 / 3, p05=0.39345, p01=0.42077),  # n = 161 # to be fixed, trio count is probably different now
         }
         if n_classes not in thresh:
             raise ValueError("n_classes must be 2 or 3")
 
-        col = colors or dict(chance="grey", p05="green", p005="purple")
+        col = colors or dict(chance="grey", p05="green", p01="purple")
 
 
 
-        ax.axhline(thresh[n_classes]["p005"],
-                   ls="--", lw=1.5, color=col["p005"],
-                   label=f"p = 0.005 ({thresh[n_classes]['p005']:.3f})")
+        ax.axhline(thresh[n_classes]["p01"],
+                   ls="--", lw=1.5, color=col["p01"],
+                   label=f"p = 0.01 ({thresh[n_classes]['p01']:.3f})")
         ax.axhline(thresh[n_classes]["p05"],
                    ls="--", lw=1.5, color=col["p05"],
                    label=f"p = 0.05 ({thresh[n_classes]['p05']:.3f})")
@@ -3896,12 +3974,14 @@ class EEGAnalyzer:
         # Modified calls to prevent info leaks
         # self.preprocess_data()  # Now just for exploration
         # self.feature_selection()  # Now just for informational purposes
-        self.evaluate_label_combinations()  # This method now handles proper CV and feature selection
+        # self.evaluate_label_combinations()  # This method now handles proper CV and feature selection
 
         # Main hyperparameter optimization (we simply always want to run with this option)
         if optimize_hyperparams:
             self.optimize_hyperparameters(n_iter=n_iter)
             self.evaluate_best_model() #already saves conf. matrx
+            self.visualize_pca()
+            self.visualize_pca_3d()
             self.permutation_test_best_model(n_perm=1_000)
             self.plot_outer_fold_distribution()
             self._visualize_optimization_results( # feature importance saved with progress
@@ -3909,22 +3989,23 @@ class EEGAnalyzer:
             )
 
             # TODO change these so they report the correct model
-            self.visualize_pca()
-            self.visualize_pca_3d()
+            # self.visualize_pca()
+            # self.visualize_pca_3d()
 
-
+        # main pipeline we have right now
         else: # run nested-cv without bayesian with gold standard permuation
             self.run_true_nested_cv()  # chooses the heuristic winner
-            self.permutation_test_final_true_cv_gold()
-            self.plot_outer_fold_distribution()
-
-            self.visualize_confusion_matrix()
-            self.visualize_pca()
-            self.visualize_pca_3d()
-            self.visualize_feature_importance()
-            self.analyze_channel_distribution()
-            self.visualize_metrics_comparison()
-            self.export_results()
+            if self.permu_count!=0:
+                self.permutation_test_final_true_cv_gold()
+                self.plot_outer_fold_distribution()
+                self.visualize_confusion_matrix()
+            # these are not relevant for this section
+            # self.visualize_pca()
+            # self.visualize_pca_3d()
+            # self.analyze_channel_distribution()
+            # self.visualize_feature_importance()
+            # self.visualize_metrics_comparison()
+            # self.export_results()
 
 
 
@@ -3962,20 +4043,20 @@ class EEGAnalyzer:
     def _default_heuristic_models(self):
         """Return the fixed‑parameter models you used before."""
         return {
-            "RandomForest": RandomForestClassifier(
-                n_estimators=80, max_depth=3, min_samples_leaf=2,
-                class_weight="balanced", random_state=42, n_jobs=-1),
-            "SVM": SVC(kernel="rbf", C=0.8, gamma="scale",
-                       class_weight="balanced", probability=True, random_state=42),
-            "ElasticNetLogReg": LogisticRegression(
-                penalty="elasticnet", C=1.0, l1_ratio=0.5,
-                solver="saga", max_iter=4000, class_weight="balanced", random_state=42),
+            # "RandomForest": RandomForestClassifier(
+            #     n_estimators=80, max_depth=3, min_samples_leaf=2,
+            #     class_weight="balanced", random_state=42, n_jobs=-1),
+            # "SVM": SVC(kernel="rbf", C=0.8, gamma="scale",
+            #            class_weight="balanced", probability=True, random_state=42),
+            # "ElasticNetLogReg": LogisticRegression(
+            #     penalty="elasticnet", C=1.0, l1_ratio=0.5,
+            #     solver="saga", max_iter=4000, class_weight="balanced", random_state=42),
             "ExtraTrees": ExtraTreesClassifier(
                 n_estimators=120, max_depth=4, min_samples_leaf=2,
                 class_weight="balanced", random_state=42, n_jobs=-1),
-            "HGBClassifier": HistGradientBoostingClassifier(
-                learning_rate=0.05, max_depth=3, max_iter=80,
-                class_weight="balanced", random_state=42),
+            # "HGBClassifier": HistGradientBoostingClassifier(
+            #     learning_rate=0.05, max_depth=3, max_iter=80,
+            #     class_weight="balanced", random_state=42),
             "kNN": KNeighborsClassifier(n_neighbors=7, weights="distance"),
             "GaussianNB": GaussianNB(),
             "ShrinkageLDA": LinearDiscriminantAnalysis(solver="lsqr", shrinkage="auto"),
@@ -4005,6 +4086,12 @@ if __name__ == "__main__":
         type=str,
         default="o2_comBat",
         help="Path to the CSV file containing EEG features",
+    )
+    parser.add_argument(
+        "--run_directory",
+        type=str,
+        default=None,
+        help="Path to save"
     )
     parser.add_argument(
         "--top_n_labels",
@@ -4076,7 +4163,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--permu_count",
         type=int,
-        default=1000,
+        default=0,
         help="Number of permutations to run optimization (default: 1k)",
     )
     parser.add_argument(
@@ -4102,6 +4189,7 @@ if __name__ == "__main__":
         optimize=args.optimize,
         eval=args.eval,
         frozen_features=args.frozen_features,
+        run_directory=args.run_directory,
     )
 
     analyzer.run_complete_analysis(

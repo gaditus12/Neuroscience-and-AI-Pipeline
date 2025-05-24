@@ -755,16 +755,16 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description='EEG Data Analysis Tool')
-    parser.add_argument('--features_file', type=str, default="data/merged_features/baseline_imagery_instruction_merge/merged_features_threezones.csv",
+    parser.add_argument('--features_file', type=str, default="data/final_sets/all_channels_binary/no_leak/final_final_set/6_sessions_fz.csv",
                         help='Path to the CSV file containing EEG features')
-    parser.add_argument('--top_n_labels', type=int, default=2,
+    parser.add_argument('--top_n_labels', type=int, default=6,
                         help='Number of labels to analyze (default: 2)')
-    parser.add_argument('--n_features', type=int, default=10,
+    parser.add_argument('--n_features', type=int, default=30,
                         help='Number of top features to select (default: 10)')
     parser.add_argument('--channel_approach', type=str, default="pooled",
                         choices=["pooled", "separate", "features"],
                         help='How to handle channel data (default: pooled)')
-    parser.add_argument('--cv_method', type=str, default="holdout",
+    parser.add_argument('--cv_method', type=str, default="kfold",
                         choices=["loo", "kfold", "holdout"],
                         help='Cross-validation method (default: loo)')
     parser.add_argument('--kfold_splits', type=int, default=10,

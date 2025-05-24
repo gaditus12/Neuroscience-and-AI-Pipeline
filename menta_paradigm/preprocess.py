@@ -174,8 +174,11 @@ def process_file(input_file, output_file, channel_map=None):
     # Rename channels
     preprocessor.rename_channels(channel_map)
 
+    # TODO DUMBASSS
+    l_freq=1
+    h_freq=30
     # Post-process: apply 50Hz notch, bandpass from 1 to 30 Hz
-    processed_raw = preprocessor.post_process(l_freq=1, h_freq=30, notch_freq=50)
+    processed_raw = preprocessor.post_process(l_freq=l_freq, h_freq=h_freq, notch_freq=50)
     if processed_raw is None:
         return False
 

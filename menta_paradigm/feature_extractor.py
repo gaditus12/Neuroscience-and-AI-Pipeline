@@ -548,7 +548,7 @@ def feat_psd_gamma_high(signal, sfreq):
 
 # Detrended Fluctuation Analysis - Long-range correlations
 def feat_dfa(signal, sfreq):
-    """
+    """h
     Perform Detrended Fluctuation Analysis.
 
     DFA measures long-range correlations in time series, which may differ during different imagery tasks.
@@ -653,6 +653,135 @@ def feat_proxy_microstate_variance(signal, sfreq):
 
     return std_duration / mean_duration if mean_duration > 0 else np.nan
 
+def feat_spi_theta(signal, sfreq, l_freq=4, h_freq=8):
+    """
+    Compute the theta-band State-Persistence Irregularity (SPI).
+
+    SPI = σ_d / μ_d, where d_i are consecutive run-lengths of a binary
+    state sequence obtained by median-splitting the theta-band envelope.
+    A high SPI denotes irregular switching; a low SPI denotes uniform,
+    microstate-like epochs.
+
+    Parameters
+    ----------
+    signal : 1-D array_like
+        Single-channel EEG trace.
+    sfreq : float
+        Sampling frequency in Hz.
+    l_freq, h_freq : float
+        Lower/upper cut-offs of the band-pass (default 4-8 Hz).
+
+    Returns
+    -------
+    float
+        SPI value (nan if fewer than two state segments are present).
+    """
+    # 1. Band-pass filter
+    sig_f = mne.filter.filter_data(signal[np.newaxis, :],
+                                   sfreq, l_freq, h_freq,
+                                   verbose=False)[0]
+
+    # 2. Binarise by median
+    states = (sig_f > np.median(sig_f)).astype(int)
+
+    # 3. Run-length encoding
+    switches = np.diff(states).nonzero()[0] + 1
+    if switches.size < 1:
+        return np.nan
+    seg_starts = np.r_[0, switches, states.size]
+    durations = np.diff(seg_starts)
+
+    # 4. Coefficient of variation
+    mu, sigma = durations.mean(), durations.std()
+    return sigma / mu if mu else np.nan
+
+def feat_spi_alpha(signal, sfreq, l_freq=8, h_freq=13):
+    """
+    Compute the alpha-band State-Persistence Irregularity (SPI).
+
+    SPI = σ_d / μ_d, where d_i are consecutive run-lengths of a binary
+    state sequence obtained by median-splitting the alpha-band envelope.
+    A high SPI denotes irregular switching; a low SPI denotes uniform,
+    microstate-like epochs.
+
+    Parameters
+    ----------
+    signal : 1-D array_like
+        Single-channel EEG trace.
+    sfreq : float
+        Sampling frequency in Hz.
+    l_freq, h_freq : float
+        Lower/upper cut-offs of the band-pass (default 8–13 Hz).
+
+    Returns
+    -------
+    float
+        SPI value (nan if fewer than two state segments are present).
+    """
+    # 1. Band-pass filter
+    sig_f = mne.filter.filter_data(signal[np.newaxis, :],
+                                   sfreq, l_freq, h_freq,
+                                   verbose=False)[0]
+
+    # 2. Binarise by median
+    states = (sig_f > np.median(sig_f)).astype(int)
+
+    # 3. Run-length encoding
+    switches = np.diff(states).nonzero()[0] + 1
+    if switches.size < 1:
+        return np.nan
+    seg_starts = np.r_[0, switches, states.size]
+    durations = np.diff(seg_starts)
+
+    # 4. Coefficient of variation
+    mu, sigma = durations.mean(), durations.std()
+    return sigma / mu if mu else np.nan
+
+def feat_spi_beta(signal, sfreq, l_freq=13, h_freq=30):
+    """
+    Compute the beta-band State-Persistence Irregularity (SPI).
+
+    SPI = σ_d / μ_d, where d_i are consecutive run-lengths of a binary
+    state sequence obtained by median-splitting the beta-band envelope.
+    A high SPI denotes irregular switching; a low SPI denotes uniform,
+    microstate-like epochs.
+
+    Parameters
+    ----------
+    signal : 1-D array_like
+        Single-channel EEG trace.
+    sfreq : float
+        Sampling frequency in Hz.
+    l_freq, h_freq : float
+        Lower/upper cut-offs of the band-pass (default 13-30 Hz).
+
+    Returns
+    -------
+    float
+        SPI value (nan if fewer than two state segments are present).
+    """
+    # 1. Band-pass filter
+    sig_f = mne.filter.filter_data(signal[np.newaxis, :],
+                                   sfreq, l_freq, h_freq,
+                                   verbose=False)[0]
+
+    # 2. Binarise by median
+    states = (sig_f > np.median(sig_f)).astype(int)
+
+    # 3. Run-length encoding
+    switches = np.diff(states).nonzero()[0] + 1
+    print (len(switches))
+    input()
+    if switches.size < 1:
+        return np.nan
+    seg_starts = np.r_[0, switches, states.size]
+    durations = np.diff(seg_starts)
+
+    # 4. Coefficient of variation
+    mu, sigma = durations.mean(), durations.std()
+    return sigma / mu if mu else np.nan
+
+
 
 # ---------------------------
 # Function to register all features
@@ -683,7 +812,7 @@ def register_all_features(extractor):
     extractor.register_feature('spectral_edge', feat_spectral_edge)
 
     # Register Nonlinear Features
-    extractor.register_feature('sample_entropy', feat_sample_entropy)
+    extractor.register_feature('sample_entropy', feat_sample_entropy) # let us skip for now #todo
     extractor.register_feature('perm_entropy', feat_permutation_entropy)
     extractor.register_feature('higuchi_fd', feat_higuchi_fd)
 
@@ -701,11 +830,14 @@ def register_all_features(extractor):
     extractor.register_feature('wavelet_complexity', feat_wavelet_complexity)
     extractor.register_feature('self_coherence', feat_self_signal_coherence)
     extractor.register_feature('self_coherence_variance', feat_self_coherence_variance)
-    # extractor.register_feature('psd_gamma_low', feat_psd_gamma_low) >30Hz /canceled out in our freq. spectrum
-    # extractor.register_feature('psd_gamma_high', feat_psd_gamma_high) >30Hz /canceled out in our freq. spectrum
+    # extractor.register_feature('psd_gamma_low', feat_psd_gamma_low) #>30Hz /canceled out in our freq. spectrum
+    # extractor.register_feature('psd_gamma_high', feat_psd_gamma_high)# >30Hz /canceled out in our freq. spectrum
     extractor.register_feature('dfa', feat_dfa)
     extractor.register_feature('energy_ratio', feat_energy_ratio)
-    extractor.register_feature('proxy_microstate_var', feat_proxy_microstate_variance)
+    # extractor.register_feature('proxy_microstate_var', feat_proxy_microstate_variance)
+    extractor.register_feature('state_pers_irr_theta', feat_spi_theta)
+    extractor.register_feature('state_pers_irr_alpha', feat_spi_alpha)
+    extractor.register_feature('state_pers_irr_beta', feat_spi_beta)
 
 # ---------------------------
 # Function to process a single file

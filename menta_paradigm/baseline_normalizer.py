@@ -174,100 +174,133 @@ def apply_combat(df: pd.DataFrame,
 
     return df_harmonised
 
-def normalize_data(imagery_df: pd.DataFrame,
-                   baseline_df: pd.DataFrame,
-                   feature_columns: list[str],
-                   run_combat: bool = True):
-    """
-    Perform within-session Z-score normalization using baseline statistics.
 
-    Args:
-        imagery_df (pd.DataFrame): DataFrame containing imagery task data
-        baseline_df (pd.DataFrame): DataFrame containing baseline data
-        feature_columns (list): List of feature column names
+from datetime import datetime
+import logging
+from typing import List, Tuple, Dict
 
-    Returns:
-        pd.DataFrame: Normalized imagery data
+import pandas as pd
+
+# Configure a module‑level logger
+logger = logging.getLogger(__name__)
+
+
+def normalize_data(
+    imagery_df: pd.DataFrame,
+    baseline_df: pd.DataFrame | None,
+    feature_columns: List[str],
+    run_combat: bool = False,
+) -> Tuple[pd.DataFrame, Dict[str, int]]:
+    """Z‑score normalise *imagery_df* within each **session × channel**.
+
+    If *baseline_df* contains rows for a given ``session`` & ``channel``
+    those rows provide the mean and standard deviation.  Otherwise the
+    imagery data for that combination is used (self‑normalisation).
+
+    Parameters
+    ----------
+    imagery_df : pd.DataFrame
+        DataFrame holding the task / imagery epochs.
+    baseline_df : pd.DataFrame | None
+        Baseline epochs.  Pass ``None`` (or an *empty* DataFrame) to force
+        self‑normalisation everywhere.
+    feature_columns : list[str]
+        Column names that should be Z‑scored.
+    run_combat : bool, default ``True``
+        Apply ComBat after normalisation.
+
+    Returns
+    -------
+    pd.DataFrame
+        The normalised imagery dataframe.
+    dict
+        Statistics about the normalisation run.
     """
+
+    # Copy input so that the original is not modified in‑place
     normalized_df = imagery_df.copy()
 
-    # Get unique session-channel combinations
-    session_channels = imagery_df[['session', 'channel']].drop_duplicates().values
+    # All unique (session, channel) pairs present in the imagery data
+    session_channels = imagery_df[["session", "channel"]].drop_duplicates().values
 
-    # Track statistics
+    # Counters for logging/debugging
     normalization_stats = {
-        'total_combinations': len(session_channels),
-        'successful': 0,
-        'skipped': 0,
-        'zero_std': 0
+        "total_combinations": len(session_channels),
+        "successful": 0,
+        "baseline_normalised": 0,
+        "self_normalised": 0,
+        "zero_std": 0,
     }
-
+    #todo revert this now does normalziation without baseline
+    baseline_df = None
     for session, channel in session_channels:
-        # Get baseline data for this session and channel
-        baseline_subset = baseline_df[(baseline_df['session'] == session) &
-                                      (baseline_df['channel'] == channel)]
+        # Decide which dataframe should provide the statistics
+        if baseline_df is not None and not baseline_df.empty:
+            stats_subset = baseline_df[(baseline_df["session"] == session) &
+                                        (baseline_df["channel"] == channel)]
+        else:
+            stats_subset = pd.DataFrame()  # guarantees *len==0* path below
 
-        # Check if we have baseline data for this session and channel
-        if len(baseline_subset) == 0:
-            logger.warning(f"No baseline data found for session {session}, channel {channel}. Skipping normalization.")
-            normalization_stats['skipped'] += 1
-            continue
+        # Fallback to imagery data when no baseline rows are available
+        if len(stats_subset) == 0:
+            stats_subset = imagery_df[(imagery_df["session"] == session) &
+                                       (imagery_df["channel"] == channel)]
+            normalization_stats["self_normalised"] += 1
+        else:
+            normalization_stats["baseline_normalised"] += 1
 
-        # Calculate baseline statistics
-        baseline_means = baseline_subset[feature_columns].mean()
-        baseline_stds = baseline_subset[feature_columns].std()
+        # Compute the mean/std that will be used for *this* session×channel
+        means = stats_subset[feature_columns].mean()
+        stds = stats_subset[feature_columns].std()
 
-        # Get imagery data for this session and channel
-        imagery_indices = normalized_df[(normalized_df['session'] == session) &
-                                        (normalized_df['channel'] == channel)].index
+        # Indices in *normalized_df* belonging to this session×channel
+        imagery_idx = normalized_df[(normalized_df["session"] == session) &
+                                     (normalized_df["channel"] == channel)].index
 
-        # Apply normalization
+        # Vectorised column‑wise transformation
         for feature in feature_columns:
-            std_value = baseline_stds[feature]
-
-            # Handle zero standard deviation
-            if std_value == 0 or pd.isna(std_value):
+            std_val = stds[feature]
+            if std_val == 0 or pd.isna(std_val):
                 logger.warning(
-                    f"Zero or NaN std for {feature} in session {session}, channel {channel}. Using mean without normalization.")
-                normalized_df.loc[imagery_indices, feature] = normalized_df.loc[imagery_indices, feature] - \
-                                                              baseline_means[feature]
-                normalization_stats['zero_std'] += 1
+                    "Zero or NaN std for %s (session=%s, channel=%s). "
+                    "Applying mean‑centering only.",
+                    feature,
+                    session,
+                    channel,
+                )
+                normalized_df.loc[imagery_idx, feature] = (
+                    normalized_df.loc[imagery_idx, feature] - means[feature]
+                )
+                normalization_stats["zero_std"] += 1
             else:
-                normalized_df.loc[imagery_indices, feature] = (
-                            (normalized_df.loc[imagery_indices, feature] - baseline_means[feature]) /
-                            std_value)
+                normalized_df.loc[imagery_idx, feature] = (
+                    normalized_df.loc[imagery_idx, feature] - means[feature]
+                ) / std_val
 
-        normalization_stats['successful'] += 1
-
-        # Log progress for every 10 combinations
-        if normalization_stats['successful'] % 10 == 0:
+        normalization_stats["successful"] += 1
+        if normalization_stats["successful"] % 10 == 0:
             logger.info(
-                f"Processed {normalization_stats['successful']}/{normalization_stats['total_combinations']} combinations")
+                "Processed %d/%d combinations",
+                normalization_stats["successful"],
+                normalization_stats["total_combinations"],
+            )
 
-    # Log normalization statistics
-    logger.info(f"Normalization complete: {normalization_stats['successful']} successful, "
-                f"{normalization_stats['skipped']} skipped, "
-                f"{normalization_stats['zero_std']} features with zero std")
+    # Final summary
+    logger.info(
+        "Normalization complete: %d successful, %d via baseline, %d self‑normalised, %d zero‑std.",
+        normalization_stats["successful"],
+        normalization_stats["baseline_normalised"],
+        normalization_stats["self_normalised"],
+        normalization_stats["zero_std"],
+    )
 
+    # ─────────────────────────────── Optional ComBat ──────────────────────────────
     if not run_combat:
         return normalized_df, normalization_stats
-    elif run_combat:
 
-        # ----------------------  NEW  ----------------------
-        # Optional: run ComBat on the already Z‑scored data
-        # normalized_df = apply_combat(normalized_df, feature_columns)
-        # ---------------------------------------------------
-
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        model_file = f"combat_model_{ts}.pkl"
-        normalized_df = apply_combat(
-            normalized_df,
-            feature_columns,
-            keep_label = False,
-                              )
-
-        return normalized_df, normalization_stats
-
+    # ``apply_combat`` must be defined elsewhere
+    normalized_df = apply_combat(normalized_df, feature_columns, keep_label=False)
+    return normalized_df, normalization_stats
 
 def save_normalized_data(normalized_df, stats, output_dir=None):
     """
@@ -364,9 +397,10 @@ def main():
         description="Z-score / ComBat EEG normaliser"
     )
     ap.add_argument("--imagery",
-                    help="CSV file *or* directory of imagery CSVs", default='data/merged_features/16_sessions_merge_0.5Hz/o2_two_0.5Hz_raw.csv', required=False)
+                    help="CSV file *or* directory of imagery CSVs", default='data/merged_features/final_set_1_30hz_SPI_with_feat_imp/trinary_classification', required=False)
     ap.add_argument("--baseline",
-                    default="data/merged_features/14_sessions_merge_1743884222/merged_features_baseline_post.csv",
+                    # default="data/merged_features/14_sessions_merge_1743884222/merged_features_baseline_post.csv",
+                    default=None,
                     help="baseline CSV (merged over sessions)")
     ap.add_argument("--steps",
                     choices=["z", "combat", "both"],
@@ -390,8 +424,10 @@ def main():
 
     # ----- load baseline once -----------------------------------------
     logger.info("Loading baseline file: %s", args.baseline)
-    baseline_df = pd.read_csv(args.baseline)
-
+    try:
+        baseline_df = pd.read_csv(args.baseline)
+    except Exception as e:
+        baseline_df = None
     # ----- iterate over imagery CSVs ----------------------------------
     if imag_path.is_file():
         _normalise_one_csv(imag_path, baseline_df, args.steps, out_root)

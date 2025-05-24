@@ -226,7 +226,7 @@ class EEGFeatureImportance:
 
         return ensemble_df
 
-    def analyze_zone(self, zone):
+    def analyze_zone(self, zone, channel):
         """
         Analyze feature importance for a specific zone.
 
@@ -237,9 +237,23 @@ class EEGFeatureImportance:
             dict: Dictionary with results for different methods
         """
         # Load merged data
-        df = self.load_merged_data(zone)
-        if df is None or len(df) == 0:
-            print(f"No data available for zone: {zone}")
+        df_zone = self.load_merged_data(zone)
+
+        if df_zone is None or len(df_zone) == 0:
+                    ...
+        # If a channel is given keep only its rows
+
+
+        if channel is not None:
+            df = df_zone[df_zone["channel"] == channel].copy()
+        else:
+            df = df_zone
+
+        # --- keep only the binary labels -----------------------------
+        df = df[df["label"].isin(['m_et_s', 'n_3_s'])].copy()
+
+        if df.empty or df["label"].nunique() < 2:
+            print(f"  • Skipping {zone} / {channel}: <2 classes after filtering")
             return None
 
         print(f"\nAnalyzing feature importance for zone: {zone}")
@@ -285,28 +299,37 @@ class EEGFeatureImportance:
         output_files = {}
 
         for zone in zones:
-            results = self.analyze_zone(zone)
-            if results is None:
+            df_zone = self.load_merged_data(zone)
+
+            if df_zone is None or len(df_zone) == 0:
                 continue
 
-            # Save results for each method
-            for method, importance_df in results.items():
-                output_file = os.path.join(self.results_dir, f"{zone}_{method}_importance.csv")
-                importance_df.to_csv(output_file, index=False)
+            # ---- NEW: iterate channel-wise -------------------------------
 
-                if method == 'ensemble':  # Save the ensemble result as the main ranking file
-                    main_output_file = os.path.join(self.merged_features_dir, f"{zone}_feature_ranking.csv")
-                    importance_df.to_csv(main_output_file, index=False)
-                    output_files[zone] = main_output_file
+            for ch in df_zone["channel"].unique():
+                results = self.analyze_zone(zone, channel=ch)
 
-                    # Create visualization
-                    self.visualize_importance(importance_df, zone)
+            # Save one CSV per <zone>_<channel>_<method>.csv
 
-            print(f"Feature importance files for {zone} saved to {self.results_dir}")
+                for method, importance_df in results.items():
+                    output_file = os.path.join(
+                                          self.results_dir,
+                                          f"{zone}_{ch}_{method}_importance.csv")
+                    importance_df.to_csv(output_file, index=False)
+                    if method == "ensemble":
+                        main_output = os.path.join(
+                                              self.merged_features_dir,
+                                             f"{zone}_{ch}_feature_ranking.csv")
+                        importance_df.to_csv(main_output, index=False)
+                        output_files[f"{zone}_{ch}"] = main_output
+                        # channel-aware plot
+                        self.visualize_importance(importance_df, zone, ch)
+
+            print(f"Feature importance for {zone} – channel {ch} saved")
 
         return output_files
 
-    def visualize_importance(self, importance_df, zone, top_n=20):
+    def visualize_importance(self, importance_df, zone, channel, top_n=20):
         """
         Create visualization of feature importance.
 
@@ -327,7 +350,7 @@ class EEGFeatureImportance:
         plt.tight_layout()
 
         # Save figure
-        output_file = os.path.join(self.results_dir, f"{zone}_importance_plot.png")
+        output_file = os.path.join(self.results_dir,f"{zone}_{channel}_importance_plot.png")
         plt.savefig(output_file, dpi=300)
         plt.close()
 
@@ -503,6 +526,7 @@ class EEGFeatureMerger:
             else:
                 print(f"No valid features found for {zone}")
 
+            self.create_binary_trinary_datasets(merged_dir=output_dir)
         return output_files
 
     def create_feature_summary(self, output_dir):
@@ -604,6 +628,70 @@ class EEGFeatureMerger:
             print("No files processed successfully for summary.")
             return None
 
+    # -------------------------------------------------
+    # NEW : build channel–separated binary / trinary CSVs
+    # -------------------------------------------------
+    def create_binary_trinary_datasets(
+        self,
+        merged_dir,
+        zone: str = "imagery_task",
+        binary_labels: tuple = ("m_et_s", "n_3_s"),
+    ):
+        """
+        For the merged file of the chosen *zone* (defaults to imagery-task),
+        create two sub-folders:
+
+        •  merged_dir / binary_classification   (one <channel>.csv per channel)
+        •  merged_dir / trinary_classification  (one <channel>_trinary.csv per channel)
+
+        – **Binary files** keep only rows whose label is in *binary_labels*.
+        – **Trinary files** map every label **not** in *binary_labels*
+          to the literal string 'other'.
+
+        Nothing else in the rows is touched: feature columns, `session`,
+        and any extra metadata stay as-is.
+        """
+        import warnings, textwrap
+
+        merged_file = os.path.join(merged_dir, f"merged_features_{zone}.csv")
+        if not os.path.isfile(merged_file):
+            warnings.warn(f"{merged_file} not found – nothing to split.")
+            return
+
+        df = pd.read_csv(merged_file)
+        mandatory = {"channel", "label"}
+        missing   = mandatory - set(df.columns)
+        if missing:
+            raise KeyError(f"{', '.join(missing)} column(s) missing in {merged_file}")
+
+        # ---------------- binary  ----------------
+        bin_dir = os.path.join(merged_dir, "binary_classification")
+        os.makedirs(bin_dir, exist_ok=True)
+
+        binary_df = df[df["label"].isin(binary_labels)].copy()
+        for ch, ch_df in binary_df.groupby("channel"):
+            ch_df.to_csv(os.path.join(bin_dir, f"{ch}.csv"), index=False)
+
+        # ---------------- trinary ----------------
+        tri_dir = os.path.join(merged_dir, "trinary_classification")
+        os.makedirs(tri_dir, exist_ok=True)
+
+        trinary_df = df.copy()
+        trinary_df["label"] = trinary_df["label"].apply(
+            lambda lbl: lbl if lbl in binary_labels else "other"
+        )
+        for ch, ch_df in trinary_df.groupby("channel"):
+            ch_df.to_csv(os.path.join(tri_dir, f"{ch}_trinary.csv"), index=False)
+
+        print(
+            textwrap.dedent(
+                f"""
+                ►  Binary channel files   ➜ {bin_dir}
+                ►  Trinary channel files  ➜ {tri_dir}
+                """
+            ).strip()
+        )
+
 
 
 # ---------------------------
@@ -696,6 +784,7 @@ def main():
         merge_start_time = time.time()
         print("\nCreating merged feature files...")
         output_files, summary_file = create_merged_feature_files(args.output_dir, args.merged_dir)
+
         merge_end_time = time.time()
 
         print(f"Feature merging time: {merge_end_time - merge_start_time:.2f} seconds")
