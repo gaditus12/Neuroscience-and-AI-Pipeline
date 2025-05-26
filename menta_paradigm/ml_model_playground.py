@@ -2819,7 +2819,7 @@ class EEGAnalyzer:
             w = np.asarray(rec["per_fold_n"], dtype=float)
             rec["mean_f1"] = float(np.average(rec["per_fold_f1"], weights=w))
             rec["mean_acc"] = float(np.average(rec["per_fold_acc"], weights=w))
-            rec["inner_mean_f1"] = float(np.average(rec["per_fold_inner_f1"], weights=w))
+            rec["inner_mean_f1"] = float(np.average(rec["per_fold_inner_f1"]))
         # store & expose the familiar objects
         self.fixed_cv_results = results
         # this is a bad bad bad issue, that's why we no longer run the test
@@ -2829,6 +2829,7 @@ class EEGAnalyzer:
         # which means it is still fine to do it per model, but not aggregated
         # self.fixed_best_model_name = max(results, key=lambda m: results[m]["mean_f1"])
         # now fixed, we choose the inner f1 winner but it is not weighted correctly, so still do not use it for multiple classifiers
+        # but actually, the inner folds are always the same size so this should be fine.
         self.fixed_best_model_name = max(results, key=lambda m: results[m]["inner_mean_f1"])
 
 
@@ -2971,12 +2972,12 @@ class EEGAnalyzer:
             })
 
             # C)  → sort models by *descending* outer mean accuracy  〈〈 NEW 〉〉
-            ordered_models = (outer_stats["outer_mean_acc"]
+            ordered_models = (inner_stats["inner_mean_acc"]
                               .sort_values(ascending=False)
                               .index)
 
             # D) merge, then re-index to that order ----------------------------
-            stats_df = (inner_stats.join(outer_stats, how="outer")
+            stats_df = (inner_stats.join(outer_stats, how="inner")
                         .loc[ordered_models]  # keep the order
                         .reset_index()
                         .rename(columns={"index": "model"}))
@@ -3012,7 +3013,6 @@ class EEGAnalyzer:
             ax.set_title("Nested-CV mean accuracy: inner selection vs outer test")
             ax.legend(frameon=False)
             fig.tight_layout()
-
             inner_outer_png = os.path.join(self.run_directory,
                                            "inner_vs_outer_mean_accuracy.png")
             fig.savefig(inner_outer_png, dpi=300)
@@ -3022,12 +3022,14 @@ class EEGAnalyzer:
         # ─────────────────────────────────────────────────────────────────────
         # ❻  Re‑fit the winner on ALL data and save in self.fixed_best_model
         # ─────────────────────────────────────────────────────────────────────
-        best_base = self.heuristic_models[self.fixed_best_model_name]
-        scaler = StandardScaler().fit(X_all)
-        sel = SelectKBest(f_classif, k=self.n_features_to_select).fit(
-            scaler.transform(X_all), y_all)
-        X_all_sel = sel.transform(scaler.transform(X_all))
-        self.fixed_best_model = clone(best_base).fit(X_all_sel, y_all)
+        # best_base = self.heuristic_models[self.fixed_best_model_name]
+        # scaler = StandardScaler().fit(X_all)
+        # # TODO wtf is this, why do we use n_features to select its bullocks
+        #
+        # sel = SelectKBest(f_classif, k=self.n_features_to_select).fit(
+        #     scaler.transform(X_all), y_all)
+        # X_all_sel = sel.transform(scaler.transform(X_all))
+        # self.fixed_best_model = clone(best_base).fit(X_all_sel, y_all)
 
         # --------------------------------------------------------------
         # ❺  Aggregate weighted scores across folds weighted by inner fold accuracies (no heuristic leakage)
@@ -3082,14 +3084,6 @@ class EEGAnalyzer:
         plt.savefig(os.path.join(self.run_directory,
                                  f"leaky_feature_scores_top{TOP_N}.png"), dpi=300)
         plt.close()
-
-
-
-
-
-
-
-
         print_log(f"\nWinner (fixed‑param): {self.fixed_best_model_name} "
                   f"with mean F1 = {results[self.fixed_best_model_name]['mean_f1']:.3f}")
 
@@ -4043,20 +4037,20 @@ class EEGAnalyzer:
     def _default_heuristic_models(self):
         """Return the fixed‑parameter models you used before."""
         return {
-            # "RandomForest": RandomForestClassifier(
-            #     n_estimators=80, max_depth=3, min_samples_leaf=2,
-            #     class_weight="balanced", random_state=42, n_jobs=-1),
-            # "SVM": SVC(kernel="rbf", C=0.8, gamma="scale",
-            #            class_weight="balanced", probability=True, random_state=42),
-            # "ElasticNetLogReg": LogisticRegression(
-            #     penalty="elasticnet", C=1.0, l1_ratio=0.5,
-            #     solver="saga", max_iter=4000, class_weight="balanced", random_state=42),
+            "RandomForest": RandomForestClassifier(
+                n_estimators=80, max_depth=3, min_samples_leaf=2,
+                class_weight="balanced", random_state=42, n_jobs=-1),
+            "SVM": SVC(kernel="rbf", C=0.8, gamma="scale",
+                       class_weight="balanced", probability=True, random_state=42),
+            "ElasticNetLogReg": LogisticRegression(
+                penalty="elasticnet", C=1.0, l1_ratio=0.5,
+                solver="saga", max_iter=4000, class_weight="balanced", random_state=42),
             "ExtraTrees": ExtraTreesClassifier(
                 n_estimators=120, max_depth=4, min_samples_leaf=2,
                 class_weight="balanced", random_state=42, n_jobs=-1),
-            # "HGBClassifier": HistGradientBoostingClassifier(
-            #     learning_rate=0.05, max_depth=3, max_iter=80,
-            #     class_weight="balanced", random_state=42),
+            "HGBClassifier": HistGradientBoostingClassifier(
+                learning_rate=0.05, max_depth=3, max_iter=80,
+                class_weight="balanced", random_state=42),
             "kNN": KNeighborsClassifier(n_neighbors=7, weights="distance"),
             "GaussianNB": GaussianNB(),
             "ShrinkageLDA": LinearDiscriminantAnalysis(solver="lsqr", shrinkage="auto"),
