@@ -2405,164 +2405,164 @@ class EEGAnalyzer:
 
 
 
-    # NESTED CV without Bayes
-    def run_nested_cv_fixed(self, models=None):
-        """
-        Nested CV **without** hyper‑parameter search.
-        Uses exactly the same outer/inner splitters that
-        `_get_nested_splitters` would give, but the inner loop is
-        only there to keep the feature‑selection / scaling strictly
-        train‑only – no optimisation is performed.
-
-        After running, the per‑model outer‑fold predictions are stored in
-        `self.fixed_cv_results` and the winning pipeline (re‑fitted on *all*
-        data) in `self.fixed_best_model`.
-        """
-        from sklearn.base import clone
-        from collections import defaultdict
-        if self.best_labels is None:
-            raise RuntimeError("call evaluate_label_combinations() first")
-
-        # ❶  Data restricted to the best label combo
-        df_best = self.df[self.df["label"].isin(self.best_labels)].reset_index(drop=True)
-        X_all = df_best[self.feature_columns]
-        y_all = df_best["label"]
-        groups_all = df_best["session"].values
-
-        # ❷  Default model dict (same heuristics you already use)
-        if models is None:
-            # ── Heuristic‑HP models (no tuning) ─────────────────────────────
-            self.heuristic_models = {
-                # 1) Random Forest – very small, shallow, balanced
-                "RandomForest": RandomForestClassifier(
-                    n_estimators=80,  # enough trees for stability, not overkill
-                    max_depth=3,  # shallow → less over‑fitting on 118 samples
-                    min_samples_split=2,
-                    min_samples_leaf=2,  # avoid single‑sample leaves
-                    class_weight="balanced",
-                    random_state=42,
-                    n_jobs=-1,
-                ),
-
-                # 2) SVM – RBF kernel with mild regularisation
-                "SVM": SVC(
-                    kernel="rbf",
-                    C=0.8,  # soft margin
-                    gamma="scale",  # 1 / (n_features × Var) – works fine here
-                    probability=True,
-                    class_weight="balanced",
-                    random_state=42,
-                ),
-
-                # 3) Elastic‑Net Logistic Regression
-                "ElasticNetLogReg": LogisticRegression(
-                    penalty="elasticnet",
-                    C=1.0,  # ≈ default strength
-                    l1_ratio=0.5,  # 50‑50 L1/L2 mix
-                    solver="saga",
-                    max_iter=4000,
-                    class_weight="balanced",
-                    random_state=42,
-                ),
-
-                # 4) Extra‑Trees – slightly deeper than RF but still conservative
-                "ExtraTrees": ExtraTreesClassifier(
-                    n_estimators=120,
-                    max_depth=4,
-                    min_samples_leaf=2,
-                    class_weight="balanced",
-                    random_state=42,
-                    n_jobs=-1,
-                ),
-
-                # 5) HistGradientBoosting – fast, regularised
-                "HGBClassifier": HistGradientBoostingClassifier(
-                    learning_rate=0.05,
-                    max_depth=3,
-                    max_iter=80,
-                    class_weight="balanced",
-                    random_state=42,
-                ),
-
-                # 6) k‑Nearest Neighbours – distance weighting, odd k
-                "kNN": KNeighborsClassifier(
-                    n_neighbors=7,
-                    weights="distance",
-                ),
-
-                # 7) Gaussian Naïve Bayes – no params to tweak
-                "GaussianNB": GaussianNB(),
-
-                # 8) Shrinkage LDA – automatic shrinkage
-                "ShrinkageLDA": LinearDiscriminantAnalysis(
-                    solver="lsqr",
-                    shrinkage="auto",
-                ),
-            }
-
-        outer_cv, _ = self._get_nested_splitters(groups_all)
-        results = {}
-
-        print_log("\n---- FIXED‑PARAM NESTED CV ----")
-        for name, base_model in self.heuristic_models.items():
-            fold_true, fold_pred, fold_f1, fold_acc = [],[], [], []
-            print_log(f"\n{name}")
-            for fold, (tr_idx, te_idx) in enumerate(
-                    outer_cv.split(X_all, y_all, groups_all), start=1):
-                X_tr, X_te = X_all.iloc[tr_idx], X_all.iloc[te_idx]
-                y_tr, y_te = y_all.iloc[tr_idx], y_all.iloc[te_idx]
-
-                # ── scale & select inside the outer fold ──────────────────
-                scaler = StandardScaler().fit(X_tr)
-                X_tr_s = scaler.transform(X_tr)
-                X_te_s = scaler.transform(X_te)
-
-                selector = SelectKBest(f_classif, k=self.n_features_to_select).fit(
-                    X_tr_s, y_tr)
-                X_tr_sel = selector.transform(X_tr_s)
-                X_te_sel = selector.transform(X_te_s)
-
-                clf = clone(base_model).fit(X_tr_sel, y_tr)
-                y_hat = clf.predict(X_te_sel)
-
-                acc_val = accuracy_score(y_te, y_hat)
-                fold_acc.append(acc_val)  # store
-
-                fold_true.append(y_te.to_numpy())
-                fold_pred.append(y_hat)
-                f1_val = f1_score(y_te, y_hat, average="macro")
-                fold_f1.append(f1_val)
-                print_log(f"  outer‑fold {fold}: F1={f1_val:.3f}")
-
-            mu = np.mean(fold_f1)
-            sig = np.std(fold_f1, ddof=0)
-            print_log(f"→ mean outer F1 = {mu:.3f} ± {sig:.3f}")
-
-            results[name] = dict(
-                per_fold_true=fold_true,
-                per_fold_pred=fold_pred,
-                per_fold_f1=fold_f1,
-                per_fold_acc=fold_acc,  # new
-                mean_f1=mu,
-                mean_acc=np.mean(fold_acc)
-            )
-
-        # store & pick the winner
-        self.fixed_cv_results = results
-        self.fixed_best_model_name = max(results, key=lambda k: results[k]["mean_f1"])
-
-        # ❸  re‑fit winner on the FULL data (still scaling + selection)
-        best_base = self.heuristic_models[self.fixed_best_model_name]
-        scaler = StandardScaler().fit(X_all)
-        X_all_s = scaler.transform(X_all)
-        selector = SelectKBest(f_classif, k=self.n_features_to_select).fit(X_all_s, y_all)
-        X_all_sel = selector.transform(X_all_s)
-
-        self.fixed_best_model = clone(best_base).fit(X_all_sel, y_all)
-
-        print_log(f"\nWinner (fixed‑param): {self.fixed_best_model_name} "
-                  f"with mean F1 = {results[self.fixed_best_model_name]['mean_f1']:.3f}")
-
+    # NESTED CV without Bayes --> removed
+    # def run_nested_cv_fixed(self, models=None):
+    #     """
+    #     Nested CV **without** hyper‑parameter search.
+    #     Uses exactly the same outer/inner splitters that
+    #     `_get_nested_splitters` would give, but the inner loop is
+    #     only there to keep the feature‑selection / scaling strictly
+    #     train‑only – no optimisation is performed.
+    #
+    #     After running, the per‑model outer‑fold predictions are stored in
+    #     `self.fixed_cv_results` and the winning pipeline (re‑fitted on *all*
+    #     data) in `self.fixed_best_model`.
+    #     """
+    #     from sklearn.base import clone
+    #     from collections import defaultdict
+    #     if self.best_labels is None:
+    #         raise RuntimeError("call evaluate_label_combinations() first")
+    #
+    #     # ❶  Data restricted to the best label combo
+    #     df_best = self.df[self.df["label"].isin(self.best_labels)].reset_index(drop=True)
+    #     X_all = df_best[self.feature_columns]
+    #     y_all = df_best["label"]
+    #     groups_all = df_best["session"].values
+    #
+    #     # ❷  Default model dict (same heuristics you already use)
+    #     if models is None:
+    #         # ── Heuristic‑HP models (no tuning) ─────────────────────────────
+    #         self.heuristic_models = {
+    #             # 1) Random Forest – very small, shallow, balanced
+    #             "RandomForest": RandomForestClassifier(
+    #                 n_estimators=80,  # enough trees for stability, not overkill
+    #                 max_depth=3,  # shallow → less over‑fitting on 118 samples
+    #                 min_samples_split=2,
+    #                 min_samples_leaf=2,  # avoid single‑sample leaves
+    #                 class_weight="balanced",
+    #                 random_state=42,
+    #                 n_jobs=-1,
+    #             ),
+    #
+    #             # 2) SVM – RBF kernel with mild regularisation
+    #             "SVM": SVC(
+    #                 kernel="rbf",
+    #                 C=0.8,  # soft margin
+    #                 gamma="scale",  # 1 / (n_features × Var) – works fine here
+    #                 probability=True,
+    #                 class_weight="balanced",
+    #                 random_state=42,
+    #             ),
+    #
+    #             # 3) Elastic‑Net Logistic Regression
+    #             "ElasticNetLogReg": LogisticRegression(
+    #                 penalty="elasticnet",
+    #                 C=1.0,  # ≈ default strength
+    #                 l1_ratio=0.5,  # 50‑50 L1/L2 mix
+    #                 solver="saga",
+    #                 max_iter=4000,
+    #                 class_weight="balanced",
+    #                 random_state=42,
+    #             ),
+    #
+    #             # 4) Extra‑Trees – slightly deeper than RF but still conservative
+    #             "ExtraTrees": ExtraTreesClassifier(
+    #                 n_estimators=120,
+    #                 max_depth=4,
+    #                 min_samples_leaf=2,
+    #                 class_weight="balanced",
+    #                 random_state=42,
+    #                 n_jobs=-1,
+    #             ),
+    #
+    #             # 5) HistGradientBoosting – fast, regularised
+    #             "HGBClassifier": HistGradientBoostingClassifier(
+    #                 learning_rate=0.05,
+    #                 max_depth=3,
+    #                 max_iter=80,
+    #                 class_weight="balanced",
+    #                 random_state=42,
+    #             ),
+    #
+    #             # 6) k‑Nearest Neighbours – distance weighting, odd k
+    #             "kNN": KNeighborsClassifier(
+    #                 n_neighbors=7,
+    #                 weights="distance",
+    #             ),
+    #
+    #             # 7) Gaussian Naïve Bayes – no params to tweak
+    #             "GaussianNB": GaussianNB(),
+    #
+    #             # 8) Shrinkage LDA – automatic shrinkage
+    #             "ShrinkageLDA": LinearDiscriminantAnalysis(
+    #                 solver="lsqr",
+    #                 shrinkage="auto",
+    #             ),
+    #         }
+    #
+    #     outer_cv, _ = self._get_nested_splitters(groups_all)
+    #     results = {}
+    #
+    #     print_log("\n---- FIXED‑PARAM NESTED CV ----")
+    #     for name, base_model in self.heuristic_models.items():
+    #         fold_true, fold_pred, fold_f1, fold_acc = [],[], [], []
+    #         print_log(f"\n{name}")
+    #         for fold, (tr_idx, te_idx) in enumerate(
+    #                 outer_cv.split(X_all, y_all, groups_all), start=1):
+    #             X_tr, X_te = X_all.iloc[tr_idx], X_all.iloc[te_idx]
+    #             y_tr, y_te = y_all.iloc[tr_idx], y_all.iloc[te_idx]
+    #
+    #             # ── scale & select inside the outer fold ──────────────────
+    #             scaler = StandardScaler().fit(X_tr)
+    #             X_tr_s = scaler.transform(X_tr)
+    #             X_te_s = scaler.transform(X_te)
+    #
+    #             selector = SelectKBest(f_classif, k=self.n_features_to_select).fit(
+    #                 X_tr_s, y_tr)
+    #             X_tr_sel = selector.transform(X_tr_s)
+    #             X_te_sel = selector.transform(X_te_s)
+    #
+    #             clf = clone(base_model).fit(X_tr_sel, y_tr)
+    #             y_hat = clf.predict(X_te_sel)
+    #
+    #             acc_val = accuracy_score(y_te, y_hat)
+    #             fold_acc.append(acc_val)  # store
+    #
+    #             fold_true.append(y_te.to_numpy())
+    #             fold_pred.append(y_hat)
+    #             f1_val = f1_score(y_te, y_hat, average="macro")
+    #             fold_f1.append(f1_val)
+    #             print_log(f"  outer‑fold {fold}: F1={f1_val:.3f}")
+    #
+    #         mu = np.mean(fold_f1)
+    #         sig = np.std(fold_f1, ddof=0)
+    #         print_log(f"→ mean outer F1 = {mu:.3f} ± {sig:.3f}")
+    #
+    #         results[name] = dict(
+    #             per_fold_true=fold_true,
+    #             per_fold_pred=fold_pred,
+    #             per_fold_f1=fold_f1,
+    #             per_fold_acc=fold_acc,  # new
+    #             mean_f1=mu,
+    #             mean_acc=np.mean(fold_acc)
+    #         )
+    #
+    #     # store & pick the winner
+    #     self.fixed_cv_results = results
+    #     self.fixed_best_model_name = max(results, key=lambda k: results[k]["mean_f1"])
+    #
+    #     # ❸  re‑fit winner on the FULL data (still scaling + selection)
+    #     best_base = self.heuristic_models[self.fixed_best_model_name]
+    #     scaler = StandardScaler().fit(X_all)
+    #     X_all_s = scaler.transform(X_all)
+    #     selector = SelectKBest(f_classif, k=self.n_features_to_select).fit(X_all_s, y_all)
+    #     X_all_sel = selector.transform(X_all_s)
+    #
+    #     self.fixed_best_model = clone(best_base).fit(X_all_sel, y_all)
+    #
+    #     print_log(f"\nWinner (fixed‑param): {self.fixed_best_model_name} "
+    #               f"with mean F1 = {results[self.fixed_best_model_name]['mean_f1']:.3f}")
+    #
 
 
     # NESTED CV without Bayes
@@ -3108,356 +3108,358 @@ class EEGAnalyzer:
             f.write(str(results))
         print_log(f"✓ Saved nested‑CV log → {log_csv}")
 
-    # ------------------------------------------------------------
-    #  Permutation test – label‑shuffle on fixed CV predictions
-    # ------------------------------------------------------------
-    def permutation_test_best_model(self,
-                                    n_perm: int = 1_000,
-                                    random_state: int = 42):
-        """
-        Ojala‑Garriga label‑shuffle test
-        (predictions are fixed; only labels are permuted).
-
-        Saves the 95‑th and 50‑th percentiles for violin‑plot overlays.
-        """
-        n_perm = self.permu_count  # honour CLI value
-        if not hasattr(self, "optimization_results"):
-            print_log("Run optimise_hyperparameters first.")
-            return
-
-        import numpy as np
-        from sklearn.metrics import f1_score, accuracy_score
-        rng = np.random.default_rng(random_state)
-
-        best_name = self.optimization_results["best_model_name"]
-        fold_f1 = np.asarray(self.optimization_results["best_results"]
-                             [best_name]["per_fold_f1"])
-        fold_acc = np.asarray(self.optimization_results["best_results"]
-                              [best_name]["per_fold_acc"])
-        per_fold_true = self.optimization_results["best_results"] \
-            [best_name]["per_fold_true"]
-        per_fold_pred = self.optimization_results["best_results"] \
-            [best_name]["per_fold_pred"]
-
-        # ---------- observed statistic (mean of per‑fold scores) ----------
-        obs_mean_f1 = float(fold_f1.mean())
-        obs_mean_acc = float(fold_acc.mean())
-        print_log(f"Observed μ F1 = {obs_mean_f1:.3f} | μ ACC = {obs_mean_acc:.3f}")
-
-        # ---------- build null distribution ------------------------------
-        # concat once for easier shuffling
-        y_true_all = np.concatenate(per_fold_true)
-        y_pred_all = np.concatenate(per_fold_pred)
-        fold_sizes = [len(t) for t in per_fold_true]
-
-        null_mean_f1 = np.empty(n_perm)
-        null_mean_acc = np.empty(n_perm)
-
-        for i in tqdm( range(n_perm), desc='Running Permutations'):
-            y_perm = rng.permutation(y_true_all)  # shuffle labels
-            start = 0
-            f1_list, acc_list = [], []
-            for n in fold_sizes:  # slice back into folds
-                ys = y_perm[start:start + n]
-                ps = y_pred_all[start:start + n]
-                f1_list.append(f1_score(ys, ps, average="macro"))
-                acc_list.append(accuracy_score(ys, ps))
-                start += n
-            null_mean_f1[i] = np.mean(f1_list)
-            null_mean_acc[i] = np.mean(acc_list)
-
-        # ---------- p‑values & critical values ----------------------------
-        p_f1 = (np.sum(null_mean_f1 >= obs_mean_f1) + 1) / (n_perm + 1)
-        p_acc = (np.sum(null_mean_acc >= obs_mean_acc) + 1) / (n_perm + 1)
-
-        crit95_f1, crit50_f1 = np.percentile(null_mean_f1, [95, 50]).astype(float)
-        crit95_acc, crit50_acc = np.percentile(null_mean_acc, [95, 50]).astype(float)
-
-        print_log(f"Permutation p‑values →  F1: {p_f1:.4f} | ACC: {p_acc:.4f}")
-
-        # ---------- save thresholds for violin plot -----------------------
-        np.save(os.path.join(self.run_directory, "null_95th_percentile.npy"),
-                crit95_f1)
-        np.save(os.path.join(self.run_directory, "null_50th_percentile.npy"),
-                crit50_f1)
-
-        # ---------- histogram figure --------------------------------------
-        import matplotlib.pyplot as plt
-        fig, ax = plt.subplots(1, 2, figsize=(12, 4), sharey=True)
-
-        ax[0].hist(null_mean_f1, 30, alpha=.7)
-        ax[0].axvline(obs_mean_f1, color="red", lw=2, label=f"Obs {obs_mean_f1:.3f}")
-        ax[0].axvline(crit95_f1, color="black", ls=":", lw=2, label="95 % null")
-        ax[0].axvline(crit50_f1, color="grey", ls=":", lw=2, label="Null mean")
-        ax[0].set(title=f"Macro‑F1 null distribution\np={p_f1:.4f}",
-                  xlabel="Mean F1", ylabel="Count")
-        ax[0].legend()
-
-        ax[1].hist(null_mean_acc, 30, alpha=.7, color="mediumaquamarine")
-        ax[1].axvline(obs_mean_acc, color="red", lw=2, label=f"Obs {obs_mean_acc:.3f}")
-        ax[1].axvline(crit95_acc, color="black", ls=":", lw=2, label="95 % null")
-        ax[1].axvline(crit50_acc, color="grey", ls=":", lw=2, label="Null mean")
-        ax[1].set(title=f"Accuracy null distribution\np={p_acc:.4f}",
-                  xlabel="Mean Accuracy")
-        ax[1].legend()
-
-        fig.suptitle(f"Permutation test – {best_name} ({n_perm} permutations)")
-        out_png = f"{self.run_directory}/permutation_histogram_{best_name}.png"
-        fig.tight_layout()
-        fig.savefig(out_png, dpi=300)
-        plt.close()
-        print_log(f"Saved permutation histogram → {out_png}")
-
-        self.permutation_p_value = {"f1": p_f1, "accuracy": p_acc}
-        return self.permutation_p_value, crit95_f1, crit50_f1
-
-
-    # ──────────────────────────────────────────────────────────────────────────────
-    #  GOLD‑STANDARD PERMUTATION TEST  (full re‑training for every shuffle)
-    # ──────────────────────────────────────────────────────────────────────────────
-    def permutation_test_gold(self,
-                              n_perm: int = 1000,
-                              random_state: int = 42):
-        """
-        Fully re‑trains the **winning fixed‑hyper‑param pipeline**
-        on *every* label shuffle → unbiased null distribution.
-
-        • Requires that `run_nested_cv_fixed()` has been executed first
-          (it decides the “winning” pipeline + stores heuristic models).
-
-        Returns
-        -------
-        dict  with p‑values and percentile thresholds.
-        """
-        n_perm=self.permu_count
-        if not hasattr(self, "fixed_cv_results"):
-            raise RuntimeError("Call run_nested_cv_fixed() before the gold permutation test")
-
-        import numpy as np, matplotlib.pyplot as plt, os
-        from tqdm import trange
-        from sklearn.base import clone
-        from sklearn.metrics import f1_score, accuracy_score
-
-        rng = np.random.default_rng(random_state)
-
-        # ----- data restricted to best‑label pair/triplet --------------------------
-        df_best = self.df[self.df["label"].isin(self.best_labels)].reset_index(drop=True)
-        X_all = df_best[self.feature_columns]
-        y_orig = df_best["label"].to_numpy()
-        groups = df_best["session"].values
-
-        outer_cv, _ = self._get_nested_splitters(groups)
-
-        # ----- use the SAME base model that won in run_nested_cv_fixed -------------
-        base_model_name = self.fixed_best_model_name
-        base_model_dict = {base_model_name:
-                               self.fixed_cv_results[base_model_name]
-                           }  # only need the name for printing
-        # you still have the original model object:
-        heuristic_models = self.heuristic_models
-        base_model = heuristic_models[base_model_name]
-
-        # ----- observed statistic (already computed) ------------------------------
-        obs_f1 = self.fixed_cv_results[base_model_name]["mean_f1"]
-
-        # containers
-        null_mean_f1 = np.empty(n_perm)
-        null_mean_acc = np.empty(n_perm)
-
-        print_log(f"\n---- GOLD permutation test ({n_perm} shuffles) "
-                  f"– evaluating {base_model_name} ----")
-
-        for p in trange(n_perm, desc="Permutations"):
-            y_perm = rng.permutation(y_orig)  # shuffle labels **before** CV
-            f1_per_fold, acc_per_fold = [], []
-
-            for tr_idx, te_idx in outer_cv.split(X_all, y_perm, groups):
-                # split the *permuted* labels exactly like the original CV
-                X_tr, X_te = X_all.iloc[tr_idx], X_all.iloc[te_idx]
-                y_tr, y_te = y_perm[tr_idx], y_perm[te_idx]
-
-                # ----- identical preprocessing as in run_nested_cv_fixed ----------
-                scaler = StandardScaler().fit(X_tr)
-                X_tr_s = scaler.transform(X_tr)
-                X_te_s = scaler.transform(X_te)
-
-                selector = SelectKBest(f_classif, k=self.n_features_to_select).fit(
-                    X_tr_s, y_tr)
-                X_tr_sel = selector.transform(X_tr_s)
-                X_te_sel = selector.transform(X_te_s)
-
-                mdl = clone(base_model).fit(X_tr_sel, y_tr)
-                y_hat = mdl.predict(X_te_sel)
-
-                f1_per_fold.append(f1_score(y_te, y_hat, average="macro"))
-                acc_per_fold.append(accuracy_score(y_te, y_hat))
-
-            null_mean_f1[p] = np.mean(f1_per_fold)
-            null_mean_acc[p] = np.mean(acc_per_fold)
-
-        # ----- p‑values -----------------------------------------------------------
-        obs_acc = self.fixed_cv_results[base_model_name]["mean_acc"]
-        p_f1 = (np.sum(null_mean_f1 >= obs_f1) + 1) / (n_perm + 1)
-        p_acc = (np.sum(null_mean_acc >= obs_acc) + 1) / (n_perm + 1)
-
-        crit95_f1 = float(np.percentile(null_mean_f1, 95))
-        crit50_f1 = float(np.percentile(null_mean_f1, 50))
-
-        # save thresholds for overlay plots if you like
-        np.save(os.path.join(self.run_directory, "gold_null95.npy"), crit95_f1)
-        np.save(os.path.join(self.run_directory, "gold_null50.npy"), crit50_f1)
-
-        # ----- histogram figure ---------------------------------------------------
-        fig, ax = plt.subplots(figsize=(6, 4))
-        ax.hist(null_mean_f1, 30, alpha=.7, label="null μ‑F1")
-        ax.axvline(obs_f1, color="red", lw=2, label=f"observed {obs_f1:.3f}")
-        ax.axvline(crit95_f1, color="black", ls=":", lw=2, label="95 % null")
-        ax.set(title=f"Gold permutation – {base_model_name}\n"
-                     f"p={p_f1:.4f}", xlabel="mean outer‑fold F1", ylabel="count")
-        ax.legend()
-        out_png = f"{self.run_directory}/gold_permutation_hist_{base_model_name}.png"
-        fig.tight_layout()
-        fig.savefig(out_png, dpi=300)
-        plt.close()
-        print_log(f"Saved gold permutation histogram → {out_png}")
-
-        return dict(p_f1=p_f1, p_acc=p_acc, crit95_f1=crit95_f1)
-
-
-
-    # ──────────────────────────────────────────────────────────────────────────────
-    #  GOLD‑STANDARD PERMUTATION TEST  (full re‑training for every shuffle)
-    # ──────────────────────────────────────────────────────────────────────────────
-    def permutation_test_true_cv_gold(self,
-                              n_perm: int = 1_000,
-                              random_state: int = 42):
-        """
-        Label‑shuffle permutation test that *re‑trains the winning pipeline*
-        inside the **same outer‑CV scheme** used in run_nested_cv_fixed().
-
-        Returns
-        -------
-        dict with p‑values and critical values for overlay plots.
-        """
-        # honour CLI / ctor argument
-        n_perm = self.permu_count if hasattr(self, "permu_count") else n_perm
-
-        if not hasattr(self, "fixed_cv_results"):
-            raise RuntimeError("Run run_nested_cv_fixed() first")
-
-        import numpy as np, matplotlib.pyplot as plt, os
-        from tqdm import trange
-        from sklearn.base import clone
-        from sklearn.metrics import f1_score, accuracy_score
-        from sklearn.model_selection import LeaveOneOut
-
-        rng = np.random.default_rng(random_state)
-
-        # ─────────────────────────────────────────────────────────────────
-        # 1) Data restricted to winning label pair / triplet
-        # ─────────────────────────────────────────────────────────────────
-        df_best = self.df[self.df["label"].isin(self.best_labels)].reset_index(drop=True)
-        X_all = df_best[self.feature_columns]
-        y_orig = df_best["label"].to_numpy()
-        groups = df_best["session"].values
-
-        # ─────────────────────────────────────────────────────────────────
-        # 2) Outer splitter identical to nested‑CV
-        # ─────────────────────────────────────────────────────────────────
-        if self.cv_method == "loo":
-            outer_cv = LeaveOneOut()
-            outer_iter = outer_cv.split(X_all, y_orig)  # no groups
-        else:
-            outer_cv, _ = self._get_nested_splitters(groups)
-            outer_iter = outer_cv.split(X_all, y_orig, groups)
-
-        # ─────────────────────────────────────────────────────────────────
-        # 3) Winning base model from nested‑CV
-        # ─────────────────────────────────────────────────────────────────
-        base_name = self.fixed_best_model_name
-        base_model = self.heuristic_models[base_name]
-        obs_f1 = self.fixed_cv_results[base_name]["mean_f1"]
-        obs_acc = self.fixed_cv_results[base_name]["mean_acc"]
-
-        null_mean_f1 = np.empty(n_perm, dtype=float)
-        null_mean_acc = np.empty(n_perm, dtype=float)
-
-        print_log(f"\n---- GOLD permutation ({n_perm} shuffles) "
-                  f"– evaluating {base_name} ----")
-
-        # ─────────────────────────────────────────────────────────────────
-        # 4) Permutation loop
-        # ─────────────────────────────────────────────────────────────────
-        for p in trange(n_perm, desc="Permutations"):
-            y_perm = rng.permutation(y_orig)  # shuffle labels BEFORE outer CV
-            f1_per_fold, acc_per_fold, fold_sizes = [], [], []
-
-            # iterate outer folds with the *same* splitter
-            if self.cv_method == "loo":
-                split_iter = outer_cv.split(X_all, y_perm)
-            else:
-                split_iter = outer_cv.split(X_all, y_perm, groups)
-
-            for tr_idx, te_idx in split_iter:
-                X_tr, X_te = X_all.iloc[tr_idx], X_all.iloc[te_idx]
-                y_tr, y_te = y_perm[tr_idx], y_perm[te_idx]
-
-                # identical preprocessing as in run_nested_cv_fixed
-                scaler = StandardScaler().fit(X_tr)
-                sel = SelectKBest(f_classif,
-                                  k=self.n_features_to_select).fit(
-                    scaler.transform(X_tr), y_tr)
-
-                X_tr_sel = sel.transform(scaler.transform(X_tr))
-                X_te_sel = sel.transform(scaler.transform(X_te))
-
-                y_hat = clone(base_model).fit(X_tr_sel, y_tr).predict(X_te_sel)
-                f1_per_fold.append(f1_score(y_te, y_hat, average="macro"))
-                acc_per_fold.append(accuracy_score(y_te, y_hat))
-                fold_sizes.append(len(te_idx))  # ← NEW
-
-            # these were session-meaned, we need sample meaned
-            # null_mean_f1[p] = float(np.mean(f1_per_fold))
-            # null_mean_acc[p] = float(np.mean(acc_per_fold))
-            w = np.asarray(fold_sizes, dtype=float)
-            null_mean_f1[p] = float(np.average(f1_per_fold, weights=w))
-            null_mean_acc[p] = float(np.average(acc_per_fold, weights=w))
-
-        # ─────────────────────────────────────────────────────────────────
-        # 5) p‑values & critical values
-        # ─────────────────────────────────────────────────────────────────
-        p_f1 = (np.sum(null_mean_f1 >= obs_f1) + 1) / (n_perm + 1)
-        p_acc = (np.sum(null_mean_acc >= obs_acc) + 1) / (n_perm + 1)
-
-        crit95_f1, crit50_f1 = np.percentile(null_mean_f1, [95, 50]).astype(float)
-
-        # save thresholds for overlay plots
-        np.save(os.path.join(self.run_directory, "gold_null95.npy"), crit95_f1)
-        np.save(os.path.join(self.run_directory, "gold_null50.npy"), crit50_f1)
-
-        # ─────────────────────────────────────────────────────────────────
-        # 6) Quick histogram figure (optional)
-        # ─────────────────────────────────────────────────────────────────
-        fig, ax = plt.subplots(figsize=(6, 4))
-        ax.hist(null_mean_f1, 30, alpha=.7, label="null μ‑F1")
-        ax.axvline(obs_f1, color="red", lw=2, label=f"observed {obs_f1:.3f}")
-        ax.axvline(crit50_f1, color="brown", ls="-", lw=2,
-                   label=f"50 % null ({crit50_f1:.3f})")
-        ax.axvline(crit95_f1, color="black", ls=":", lw=2,
-                   label=f"95 % null ({crit95_f1:.3f})")
-        ax.set(title=f"Gold permutation – {base_name}\n"
-                     f"p={p_f1:.4f}",
-               xlabel="mean outer‑fold F1", ylabel="count")
-        ax.legend()
-        out_png = os.path.join(self.run_directory,
-                               f"gold_permutation_hist_{base_name}.png")
-        fig.tight_layout()
-        fig.savefig(out_png, dpi=300)
-        plt.close()
-        print_log(f"Saved gold permutation histogram → {out_png}")
-
-        return dict(p_f1=p_f1, p_acc=p_acc,
-                    crit95_f1=crit95_f1, crit50_f1=crit50_f1)
+    ''' unused ones now commented out'''
+    #
+    # # ------------------------------------------------------------
+    # #  Permutation test – label‑shuffle on fixed CV predictions
+    # # ------------------------------------------------------------
+    # def permutation_test_best_model(self,
+    #                                 n_perm: int = 1_000,
+    #                                 random_state: int = 42):
+    #     """
+    #     Ojala‑Garriga label‑shuffle test
+    #     (predictions are fixed; only labels are permuted).
+    #
+    #     Saves the 95‑th and 50‑th percentiles for violin‑plot overlays.
+    #     """
+    #     n_perm = self.permu_count  # honour CLI value
+    #     if not hasattr(self, "optimization_results"):
+    #         print_log("Run optimise_hyperparameters first.")
+    #         return
+    #
+    #     import numpy as np
+    #     from sklearn.metrics import f1_score, accuracy_score
+    #     rng = np.random.default_rng(random_state)
+    #
+    #     best_name = self.optimization_results["best_model_name"]
+    #     fold_f1 = np.asarray(self.optimization_results["best_results"]
+    #                          [best_name]["per_fold_f1"])
+    #     fold_acc = np.asarray(self.optimization_results["best_results"]
+    #                           [best_name]["per_fold_acc"])
+    #     per_fold_true = self.optimization_results["best_results"] \
+    #         [best_name]["per_fold_true"]
+    #     per_fold_pred = self.optimization_results["best_results"] \
+    #         [best_name]["per_fold_pred"]
+    #
+    #     # ---------- observed statistic (mean of per‑fold scores) ----------
+    #     obs_mean_f1 = float(fold_f1.mean())
+    #     obs_mean_acc = float(fold_acc.mean())
+    #     print_log(f"Observed μ F1 = {obs_mean_f1:.3f} | μ ACC = {obs_mean_acc:.3f}")
+    #
+    #     # ---------- build null distribution ------------------------------
+    #     # concat once for easier shuffling
+    #     y_true_all = np.concatenate(per_fold_true)
+    #     y_pred_all = np.concatenate(per_fold_pred)
+    #     fold_sizes = [len(t) for t in per_fold_true]
+    #
+    #     null_mean_f1 = np.empty(n_perm)
+    #     null_mean_acc = np.empty(n_perm)
+    #
+    #     for i in tqdm( range(n_perm), desc='Running Permutations'):
+    #         y_perm = rng.permutation(y_true_all)  # shuffle labels
+    #         start = 0
+    #         f1_list, acc_list = [], []
+    #         for n in fold_sizes:  # slice back into folds
+    #             ys = y_perm[start:start + n]
+    #             ps = y_pred_all[start:start + n]
+    #             f1_list.append(f1_score(ys, ps, average="macro"))
+    #             acc_list.append(accuracy_score(ys, ps))
+    #             start += n
+    #         null_mean_f1[i] = np.mean(f1_list)
+    #         null_mean_acc[i] = np.mean(acc_list)
+    #
+    #     # ---------- p‑values & critical values ----------------------------
+    #     p_f1 = (np.sum(null_mean_f1 >= obs_mean_f1) + 1) / (n_perm + 1)
+    #     p_acc = (np.sum(null_mean_acc >= obs_mean_acc) + 1) / (n_perm + 1)
+    #
+    #     crit95_f1, crit50_f1 = np.percentile(null_mean_f1, [95, 50]).astype(float)
+    #     crit95_acc, crit50_acc = np.percentile(null_mean_acc, [95, 50]).astype(float)
+    #
+    #     print_log(f"Permutation p‑values →  F1: {p_f1:.4f} | ACC: {p_acc:.4f}")
+    #
+    #     # ---------- save thresholds for violin plot -----------------------
+    #     np.save(os.path.join(self.run_directory, "null_95th_percentile.npy"),
+    #             crit95_f1)
+    #     np.save(os.path.join(self.run_directory, "null_50th_percentile.npy"),
+    #             crit50_f1)
+    #
+    #     # ---------- histogram figure --------------------------------------
+    #     import matplotlib.pyplot as plt
+    #     fig, ax = plt.subplots(1, 2, figsize=(12, 4), sharey=True)
+    #
+    #     ax[0].hist(null_mean_f1, 30, alpha=.7)
+    #     ax[0].axvline(obs_mean_f1, color="red", lw=2, label=f"Obs {obs_mean_f1:.3f}")
+    #     ax[0].axvline(crit95_f1, color="black", ls=":", lw=2, label="95 % null")
+    #     ax[0].axvline(crit50_f1, color="grey", ls=":", lw=2, label="Null mean")
+    #     ax[0].set(title=f"Macro‑F1 null distribution\np={p_f1:.4f}",
+    #               xlabel="Mean F1", ylabel="Count")
+    #     ax[0].legend()
+    #
+    #     ax[1].hist(null_mean_acc, 30, alpha=.7, color="mediumaquamarine")
+    #     ax[1].axvline(obs_mean_acc, color="red", lw=2, label=f"Obs {obs_mean_acc:.3f}")
+    #     ax[1].axvline(crit95_acc, color="black", ls=":", lw=2, label="95 % null")
+    #     ax[1].axvline(crit50_acc, color="grey", ls=":", lw=2, label="Null mean")
+    #     ax[1].set(title=f"Accuracy null distribution\np={p_acc:.4f}",
+    #               xlabel="Mean Accuracy")
+    #     ax[1].legend()
+    #
+    #     fig.suptitle(f"Permutation test – {best_name} ({n_perm} permutations)")
+    #     out_png = f"{self.run_directory}/permutation_histogram_{best_name}.png"
+    #     fig.tight_layout()
+    #     fig.savefig(out_png, dpi=300)
+    #     plt.close()
+    #     print_log(f"Saved permutation histogram → {out_png}")
+    #
+    #     self.permutation_p_value = {"f1": p_f1, "accuracy": p_acc}
+    #     return self.permutation_p_value, crit95_f1, crit50_f1
+    #
+    #
+    # # ──────────────────────────────────────────────────────────────────────────────
+    # #  GOLD‑STANDARD PERMUTATION TEST  (full re‑training for every shuffle)
+    # # ──────────────────────────────────────────────────────────────────────────────
+    # def permutation_test_gold(self,
+    #                           n_perm: int = 1000,
+    #                           random_state: int = 42):
+    #     """
+    #     Fully re‑trains the **winning fixed‑hyper‑param pipeline**
+    #     on *every* label shuffle → unbiased null distribution.
+    #
+    #     • Requires that `run_nested_cv_fixed()` has been executed first
+    #       (it decides the “winning” pipeline + stores heuristic models).
+    #
+    #     Returns
+    #     -------
+    #     dict  with p‑values and percentile thresholds.
+    #     """
+    #     n_perm=self.permu_count
+    #     if not hasattr(self, "fixed_cv_results"):
+    #         raise RuntimeError("Call run_nested_cv_fixed() before the gold permutation test")
+    #
+    #     import numpy as np, matplotlib.pyplot as plt, os
+    #     from tqdm import trange
+    #     from sklearn.base import clone
+    #     from sklearn.metrics import f1_score, accuracy_score
+    #
+    #     rng = np.random.default_rng(random_state)
+    #
+    #     # ----- data restricted to best‑label pair/triplet --------------------------
+    #     df_best = self.df[self.df["label"].isin(self.best_labels)].reset_index(drop=True)
+    #     X_all = df_best[self.feature_columns]
+    #     y_orig = df_best["label"].to_numpy()
+    #     groups = df_best["session"].values
+    #
+    #     outer_cv, _ = self._get_nested_splitters(groups)
+    #
+    #     # ----- use the SAME base model that won in run_nested_cv_fixed -------------
+    #     base_model_name = self.fixed_best_model_name
+    #     base_model_dict = {base_model_name:
+    #                            self.fixed_cv_results[base_model_name]
+    #                        }  # only need the name for printing
+    #     # you still have the original model object:
+    #     heuristic_models = self.heuristic_models
+    #     base_model = heuristic_models[base_model_name]
+    #
+    #     # ----- observed statistic (already computed) ------------------------------
+    #     obs_f1 = self.fixed_cv_results[base_model_name]["mean_f1"]
+    #
+    #     # containers
+    #     null_mean_f1 = np.empty(n_perm)
+    #     null_mean_acc = np.empty(n_perm)
+    #
+    #     print_log(f"\n---- GOLD permutation test ({n_perm} shuffles) "
+    #               f"– evaluating {base_model_name} ----")
+    #
+    #     for p in trange(n_perm, desc="Permutations"):
+    #         y_perm = rng.permutation(y_orig)  # shuffle labels **before** CV
+    #         f1_per_fold, acc_per_fold = [], []
+    #
+    #         for tr_idx, te_idx in outer_cv.split(X_all, y_perm, groups):
+    #             # split the *permuted* labels exactly like the original CV
+    #             X_tr, X_te = X_all.iloc[tr_idx], X_all.iloc[te_idx]
+    #             y_tr, y_te = y_perm[tr_idx], y_perm[te_idx]
+    #
+    #             # ----- identical preprocessing as in run_nested_cv_fixed ----------
+    #             scaler = StandardScaler().fit(X_tr)
+    #             X_tr_s = scaler.transform(X_tr)
+    #             X_te_s = scaler.transform(X_te)
+    #
+    #             selector = SelectKBest(f_classif, k=self.n_features_to_select).fit(
+    #                 X_tr_s, y_tr)
+    #             X_tr_sel = selector.transform(X_tr_s)
+    #             X_te_sel = selector.transform(X_te_s)
+    #
+    #             mdl = clone(base_model).fit(X_tr_sel, y_tr)
+    #             y_hat = mdl.predict(X_te_sel)
+    #
+    #             f1_per_fold.append(f1_score(y_te, y_hat, average="macro"))
+    #             acc_per_fold.append(accuracy_score(y_te, y_hat))
+    #
+    #         null_mean_f1[p] = np.mean(f1_per_fold)
+    #         null_mean_acc[p] = np.mean(acc_per_fold)
+    #
+    #     # ----- p‑values -----------------------------------------------------------
+    #     obs_acc = self.fixed_cv_results[base_model_name]["mean_acc"]
+    #     p_f1 = (np.sum(null_mean_f1 >= obs_f1) + 1) / (n_perm + 1)
+    #     p_acc = (np.sum(null_mean_acc >= obs_acc) + 1) / (n_perm + 1)
+    #
+    #     crit95_f1 = float(np.percentile(null_mean_f1, 95))
+    #     crit50_f1 = float(np.percentile(null_mean_f1, 50))
+    #
+    #     # save thresholds for overlay plots if you like
+    #     np.save(os.path.join(self.run_directory, "gold_null95.npy"), crit95_f1)
+    #     np.save(os.path.join(self.run_directory, "gold_null50.npy"), crit50_f1)
+    #
+    #     # ----- histogram figure ---------------------------------------------------
+    #     fig, ax = plt.subplots(figsize=(6, 4))
+    #     ax.hist(null_mean_f1, 30, alpha=.7, label="null μ‑F1")
+    #     ax.axvline(obs_f1, color="red", lw=2, label=f"observed {obs_f1:.3f}")
+    #     ax.axvline(crit95_f1, color="black", ls=":", lw=2, label="95 % null")
+    #     ax.set(title=f"Gold permutation – {base_model_name}\n"
+    #                  f"p={p_f1:.4f}", xlabel="mean outer‑fold F1", ylabel="count")
+    #     ax.legend()
+    #     out_png = f"{self.run_directory}/gold_permutation_hist_{base_model_name}.png"
+    #     fig.tight_layout()
+    #     fig.savefig(out_png, dpi=300)
+    #     plt.close()
+    #     print_log(f"Saved gold permutation histogram → {out_png}")
+    #
+    #     return dict(p_f1=p_f1, p_acc=p_acc, crit95_f1=crit95_f1)
+    #
+    #
+    #
+    # # ──────────────────────────────────────────────────────────────────────────────
+    # #  GOLD‑STANDARD PERMUTATION TEST  (full re‑training for every shuffle)
+    # # ──────────────────────────────────────────────────────────────────────────────
+    # def permutation_test_true_cv_gold(self,
+    #                           n_perm: int = 1_000,
+    #                           random_state: int = 42):
+    #     """
+    #     Label‑shuffle permutation test that *re‑trains the winning pipeline*
+    #     inside the **same outer‑CV scheme** used in run_nested_cv_fixed().
+    #
+    #     Returns
+    #     -------
+    #     dict with p‑values and critical values for overlay plots.
+    #     """
+    #     # honour CLI / ctor argument
+    #     n_perm = self.permu_count if hasattr(self, "permu_count") else n_perm
+    #
+    #     if not hasattr(self, "fixed_cv_results"):
+    #         raise RuntimeError("Run run_nested_cv_fixed() first")
+    #
+    #     import numpy as np, matplotlib.pyplot as plt, os
+    #     from tqdm import trange
+    #     from sklearn.base import clone
+    #     from sklearn.metrics import f1_score, accuracy_score
+    #     from sklearn.model_selection import LeaveOneOut
+    #
+    #     rng = np.random.default_rng(random_state)
+    #
+    #     # ─────────────────────────────────────────────────────────────────
+    #     # 1) Data restricted to winning label pair / triplet
+    #     # ─────────────────────────────────────────────────────────────────
+    #     df_best = self.df[self.df["label"].isin(self.best_labels)].reset_index(drop=True)
+    #     X_all = df_best[self.feature_columns]
+    #     y_orig = df_best["label"].to_numpy()
+    #     groups = df_best["session"].values
+    #
+    #     # ─────────────────────────────────────────────────────────────────
+    #     # 2) Outer splitter identical to nested‑CV
+    #     # ─────────────────────────────────────────────────────────────────
+    #     if self.cv_method == "loo":
+    #         outer_cv = LeaveOneOut()
+    #         outer_iter = outer_cv.split(X_all, y_orig)  # no groups
+    #     else:
+    #         outer_cv, _ = self._get_nested_splitters(groups)
+    #         outer_iter = outer_cv.split(X_all, y_orig, groups)
+    #
+    #     # ─────────────────────────────────────────────────────────────────
+    #     # 3) Winning base model from nested‑CV
+    #     # ─────────────────────────────────────────────────────────────────
+    #     base_name = self.fixed_best_model_name
+    #     base_model = self.heuristic_models[base_name]
+    #     obs_f1 = self.fixed_cv_results[base_name]["mean_f1"]
+    #     obs_acc = self.fixed_cv_results[base_name]["mean_acc"]
+    #
+    #     null_mean_f1 = np.empty(n_perm, dtype=float)
+    #     null_mean_acc = np.empty(n_perm, dtype=float)
+    #
+    #     print_log(f"\n---- GOLD permutation ({n_perm} shuffles) "
+    #               f"– evaluating {base_name} ----")
+    #
+    #     # ─────────────────────────────────────────────────────────────────
+    #     # 4) Permutation loop
+    #     # ─────────────────────────────────────────────────────────────────
+    #     for p in trange(n_perm, desc="Permutations"):
+    #         y_perm = rng.permutation(y_orig)  # shuffle labels BEFORE outer CV
+    #         f1_per_fold, acc_per_fold, fold_sizes = [], [], []
+    #
+    #         # iterate outer folds with the *same* splitter
+    #         if self.cv_method == "loo":
+    #             split_iter = outer_cv.split(X_all, y_perm)
+    #         else:
+    #             split_iter = outer_cv.split(X_all, y_perm, groups)
+    #
+    #         for tr_idx, te_idx in split_iter:
+    #             X_tr, X_te = X_all.iloc[tr_idx], X_all.iloc[te_idx]
+    #             y_tr, y_te = y_perm[tr_idx], y_perm[te_idx]
+    #
+    #             # identical preprocessing as in run_nested_cv_fixed
+    #             scaler = StandardScaler().fit(X_tr)
+    #             sel = SelectKBest(f_classif,
+    #                               k=self.n_features_to_select).fit(
+    #                 scaler.transform(X_tr), y_tr)
+    #
+    #             X_tr_sel = sel.transform(scaler.transform(X_tr))
+    #             X_te_sel = sel.transform(scaler.transform(X_te))
+    #
+    #             y_hat = clone(base_model).fit(X_tr_sel, y_tr).predict(X_te_sel)
+    #             f1_per_fold.append(f1_score(y_te, y_hat, average="macro"))
+    #             acc_per_fold.append(accuracy_score(y_te, y_hat))
+    #             fold_sizes.append(len(te_idx))  # ← NEW
+    #
+    #         # these were session-meaned, we need sample meaned
+    #         # null_mean_f1[p] = float(np.mean(f1_per_fold))
+    #         # null_mean_acc[p] = float(np.mean(acc_per_fold))
+    #         w = np.asarray(fold_sizes, dtype=float)
+    #         null_mean_f1[p] = float(np.average(f1_per_fold, weights=w))
+    #         null_mean_acc[p] = float(np.average(acc_per_fold, weights=w))
+    #
+    #     # ─────────────────────────────────────────────────────────────────
+    #     # 5) p‑values & critical values
+    #     # ─────────────────────────────────────────────────────────────────
+    #     p_f1 = (np.sum(null_mean_f1 >= obs_f1) + 1) / (n_perm + 1)
+    #     p_acc = (np.sum(null_mean_acc >= obs_acc) + 1) / (n_perm + 1)
+    #
+    #     crit95_f1, crit50_f1 = np.percentile(null_mean_f1, [95, 50]).astype(float)
+    #
+    #     # save thresholds for overlay plots
+    #     np.save(os.path.join(self.run_directory, "gold_null95.npy"), crit95_f1)
+    #     np.save(os.path.join(self.run_directory, "gold_null50.npy"), crit50_f1)
+    #
+    #     # ─────────────────────────────────────────────────────────────────
+    #     # 6) Quick histogram figure (optional)
+    #     # ─────────────────────────────────────────────────────────────────
+    #     fig, ax = plt.subplots(figsize=(6, 4))
+    #     ax.hist(null_mean_f1, 30, alpha=.7, label="null μ‑F1")
+    #     ax.axvline(obs_f1, color="red", lw=2, label=f"observed {obs_f1:.3f}")
+    #     ax.axvline(crit50_f1, color="brown", ls="-", lw=2,
+    #                label=f"50 % null ({crit50_f1:.3f})")
+    #     ax.axvline(crit95_f1, color="black", ls=":", lw=2,
+    #                label=f"95 % null ({crit95_f1:.3f})")
+    #     ax.set(title=f"Gold permutation – {base_name}\n"
+    #                  f"p={p_f1:.4f}",
+    #            xlabel="mean outer‑fold F1", ylabel="count")
+    #     ax.legend()
+    #     out_png = os.path.join(self.run_directory,
+    #                            f"gold_permutation_hist_{base_name}.png")
+    #     fig.tight_layout()
+    #     fig.savefig(out_png, dpi=300)
+    #     plt.close()
+    #     print_log(f"Saved gold permutation histogram → {out_png}")
+    #
+    #     return dict(p_f1=p_f1, p_acc=p_acc,
+    #                 crit95_f1=crit95_f1, crit50_f1=crit50_f1)
 
     def permutation_test_final_true_cv_gold(self,
                                         n_perm: int = 1_000,
