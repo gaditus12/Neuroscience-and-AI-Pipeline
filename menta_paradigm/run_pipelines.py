@@ -19,34 +19,34 @@ FEATURES = {
     #     # 'TP8_norm-ComBat',
     # ],
     'z':[
-        'Fz_spi_norm-z',
-        'O1_spi_norm-z',
-        'Oz_spi_norm-z',
+        # 'Fz_spi_norm-z',
+        # 'O1_spi_norm-z',
+        # 'Oz_spi_norm-z',
         'O2_spi_norm-z',
-        'po3_spi_norm-z',
+        # 'po3_spi_norm-z',
         'po4_spi_norm-z',
-        'tp7_spi_norm-z',
-        'tp8_spi_norm-z',
+        # 'tp7_spi_norm-z',
+        # 'tp8_spi_norm-z',
     ],
-    # 'raw': [
-    #     'Fz_spi',
-    #     'O1_spi',
-    #     'O2_SPI',
-    #     'Oz_spi',
-    #     'PO3_spi',
-    #     'PO4_SPI',
-    #     'TP7_spi',
-    #     'TP8_spi',
-    # ],
+    'raw': [
+        # 'Fz_spi',
+        # 'O1_spi',
+        'O2_SPI',
+        # 'Oz_spi',
+        # 'PO3_spi',
+        'PO4_SPI',
+        # 'TP7_spi',
+        # 'TP8_spi',
+    ],
     'combat': [
-        'Fz_spi_norm-ComBat',
-        'O1_spi_norm-ComBat',
+        # 'Fz_spi_norm-ComBat',
+        # 'O1_spi_norm-ComBat',
         'O2_spi_norm-ComBat',
-        'Oz_spi_norm-ComBat',
-        'PO3_spi_norm-ComBat',
+        # 'Oz_spi_norm-ComBat',
+        # 'PO3_spi_norm-ComBat',
         'PO4_spi_norm-ComBat',
-        'TP7_spi_norm-ComBat',
-        'TP8_spi_norm-ComBat',
+        # 'TP7_spi_norm-ComBat',
+        # 'TP8_spi_norm-ComBat',
     ]
 }
 
@@ -57,7 +57,7 @@ def parse_args():
                      help="List of frozen_features values")
     grp.add_argument('--frozen_features', type=int,
                      help="Single frozen_features value")
-    p.add_argument('--features_type', choices=['combat', 'z',], # 'raw'],
+    p.add_argument('--features_type', choices=['combat', 'z', ],#'raw'],
                    help="If given, only run that set")
     p.add_argument('--cv_method', choices=['loso','kfold'],
                    help="If given, only run that CV")

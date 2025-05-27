@@ -57,7 +57,7 @@ HEURISTIC_MODELS = {
 }
 
 #  Number-of-features grid used inside each model’s inner CV
-K_GRID = [2, 3, 5, 10, 15]
+K_GRID = [2, 3, 5, 10]
 
 # --------------------------------------------------------------------------
 def make_outer_inner(cv_method, y, groups, random_state=24):
@@ -230,7 +230,7 @@ def main():
 def print_log(x):
     message = str(x)
     print(message)
-    with open('brown_corrections' +  f"/[{cv}]_[{n_perm}_perm]_[{file}].txt", "a", encoding="utf-8") as f:
+    with open('brown_corrections' +  f"/[{cv}]_[{n_perm}_perm]_[{file}]_[{K_GRID}].txt", "a", encoding="utf-8") as f:
         f.write(message + "\n")
 
 

@@ -109,7 +109,7 @@ class EEGAnalyzer:
 
         # Configuration
         if frozen_features is None:
-            frozen_features = [2,3,5,10,15]
+            frozen_features = [2,3,5,10]
         else:
             frozen_features = [frozen_features]
         self.features_file = (
@@ -1733,6 +1733,30 @@ class EEGAnalyzer:
         print_log(f"Metrics comparison visualization saved as '{metrics_file}'")
         plt.close()
 
+    def _save_conf_mat(self, cm, model_name):
+        """
+        Heat-map a confusion-matrix and write it to
+        <run_directory>/confusion_matrices/<model>_confmat_<cv>.png
+        """
+        import os, matplotlib.pyplot as plt, seaborn as sns
+        cm_dir = os.path.join(self.run_directory, "confusion_matrices")
+        os.makedirs(cm_dir, exist_ok=True)
+
+        labels = list(self.best_labels)  # rows / cols order
+        plt.figure(figsize=(8, 6))
+        sns.heatmap(cm,
+                    annot=True, fmt="d", cmap="Blues",
+                    xticklabels=labels, yticklabels=labels)
+        plt.xlabel("Predicted");
+        plt.ylabel("True")
+        plt.title(f"{model_name} – confusion matrix ({self.cv_method})")
+
+        out_png = os.path.join(cm_dir,
+                               f"{model_name}_confmat_{self.cv_method}.png")
+        plt.savefig(out_png, dpi=300, bbox_inches="tight")
+        plt.close()
+        print_log(f"✓ Saved confusion matrix for {model_name}  →  {out_png}")
+
     def export_results(self):
         """Export detailed results to CSV files"""
         print_log("\n---- EXPORTING RESULTS ----")
@@ -2807,6 +2831,23 @@ class EEGAnalyzer:
             #                   "weighted": weighted_importances,
             #                   "fold": f})
             # )
+
+        # ─────────────────────────────────────────────────────────────────────
+        # ⓪  Build a single confusion matrix per model across all outer folds
+        # ─────────────────────────────────────────────────────────────────────
+        cm_dir = os.path.join(self.run_directory, "confusion_matrices")
+        os.makedirs(cm_dir, exist_ok=True)
+
+        for mdl, rec in results.items():
+            # join all held-out predictions for this model
+            y_true = np.concatenate(rec["per_fold_true"])
+            y_pred = np.concatenate(rec["per_fold_pred"])
+
+            cm = confusion_matrix(y_true, y_pred, labels=list(self.best_labels))
+            rec["confusion_matrix"] = cm  # keep it in memory
+
+            # pretty picture on disk
+            self._save_conf_mat(cm, mdl)
 
 
         # ─────────────────────────────────────────────────────────────────────
