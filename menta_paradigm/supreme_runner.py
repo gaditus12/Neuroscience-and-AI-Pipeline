@@ -18,10 +18,12 @@ def main():
 
     # Define channels, models, and accuracies
     channels_models = {
-        "o2_comBat": {"model": "rf", "accuracy": 0.66},
-        "po4_comBat": {"model": "knn", "accuracy": 0.59},
-        "tp8_comBat": {"model": "rf", "accuracy": 0.7},
-        "oz_comBat": {"model": "lda", "accuracy": 0.65},
+        # "po4_spi_norm-z": {"model": "svm", "accuracy": 0.6},
+        # "o2_spi_norm-combat": {"model": "svm", "accuracy": 0.6},
+        "o2_spi_norm-z": {"model": "svm", "accuracy": 0.6},
+        # "po4_spi_norm-combat": {"model": "svm", "accuracy": 0.6},
+        # 'o2_spi': {"model": "svm", "accuracy": 0.6},
+        "o2_spi": {"model": "svm", "accuracy": 0.6},
     }
 
     # Save configuration to JSON file
@@ -33,9 +35,9 @@ def main():
         channels_models=channels_models,
         cv_method=args.cv_method,
         top_n_labels=2,
-        n_features_to_select=15,
+        n_features_to_select=5,
         lmoso_leftout=2,
-        permu_count=100,
+        permu_count=1,
     )
 
     # Run complete analysis

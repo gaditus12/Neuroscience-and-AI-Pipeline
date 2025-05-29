@@ -64,7 +64,7 @@ class SupremeTrainer:
         kfold_splits=5,
         lmoso_leftout=2,
         permu_count=1000,
-        data_path="data/final_sets/all_channels_binary",
+        data_path="final_final_set/",
         random_state=42,
         n_iter=10,
     ):
@@ -1694,10 +1694,8 @@ if __name__ == "__main__":
         #  more or less difficult to deal with.
         # Example default configuration
         channels_models = {
-            "o2_comBat": {"model": "rf", "accuracy": 0.6},
-            "po4_comBat": {"model": "knn", "accuracy": 0.55},
-            "tp8_comBat": {"model": "rf", "accuracy": 0.6},
-            "oz_comBat": {"model": "knn", "accuracy": 0.55},
+            "po4_spi_norm-z": {"model": "rf", "accuracy": 0.6},
+            "o2_spi_norm-z": {"model": "knn", "accuracy": 0.6},
         }
 
     # Create and run the supreme trainer

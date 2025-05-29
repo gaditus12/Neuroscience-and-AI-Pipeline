@@ -236,7 +236,7 @@ def print_log(x):
 
 if __name__ == "__main__":
     t1 = time.time()
-    cv = 'loso'
+    cv = 'kfold'
     file="O2_SPI_norm-Z"
     p_values=("0.016,"
               "0.007,"
@@ -246,5 +246,5 @@ if __name__ == "__main__":
               "0.015,"
               "0.005," #rf
               "0.012")
-    n_perm = 15
+    n_perm = 100
     main()

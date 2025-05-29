@@ -2357,77 +2357,74 @@ class EEGAnalyzer:
     # ------------------------------------------------------------
     def plot_outer_fold_distribution(self):
         """
-        Violin/strip plot of outer‑fold macro‑F1 with bootstrap CI and
-        (optionally) gold‑/OG‑null thresholds.
-
-        Works for both:
-            – self.optimization_results   (Bayes search route)
-            – self.fixed_cv_results       (heuristic‑HP route)
+        Violin + scatter of outer-fold macro-F1 for the nested-CV winner.
+        Adds reference lines: chance (0.50) and theoretical 95 % (0.585).
         """
-        import os, numpy as np, matplotlib.pyplot as plt, seaborn as sns
 
-        # -----------------------------------------------------------------
-        # 1) detect which result container is present
-        # -----------------------------------------------------------------
+        import numpy as np, matplotlib.pyplot as plt, seaborn as sns
+        import os
+
+        # --------------------------------------------------------------
+        # 1) fetch the fold-wise F1 of *the* model that won the inner CV
+        # --------------------------------------------------------------
         if hasattr(self, "optimization_results"):
             container = self.optimization_results
             best_name = container["best_model_name"]
             fold_scores = np.asarray(container["best_results"][best_name]["per_fold_f1"])
         elif hasattr(self, "fixed_cv_results"):
-            best_name = self.fixed_best_model_name  # stored by run_nested_cv_fixed
+            best_name = self.fixed_best_model_name
             fold_scores = np.asarray(self.fixed_cv_results[best_name]["per_fold_f1"])
         else:
-            print_log("No outer‑CV results found – run nested CV first.")
+            print_log("No outer-CV results found – run nested CV first.")
             return
 
-        # -----------------------------------------------------------------
-        # 2) basic statistics
-        # -----------------------------------------------------------------
-        mean_s = fold_scores.mean()
-        sd_s = fold_scores.std(ddof=0)
-
+        # --------------------------------------------------------------
+        # 2) summary stats + bootstrap CI
+        # --------------------------------------------------------------
+        mean_s, sd_s = fold_scores.mean(), fold_scores.std(ddof=0)
         rng = np.random.default_rng(42)
-        boot_means = rng.choice(fold_scores,
-                                size=(5000, fold_scores.size),
-                                replace=True).mean(axis=1)
+        boot_means = rng.choice(fold_scores, size=(5000, fold_scores.size), replace=True).mean(axis=1)
         ci_low, ci_high = np.percentile(boot_means, [2.5, 97.5])
 
-        # -----------------------------------------------------------------
+        # --------------------------------------------------------------
         # 3) plot
-        # -----------------------------------------------------------------
-        plt.figure(figsize=(5, 6))
+        # --------------------------------------------------------------
+        plt.figure(figsize=(4, 6))
         ax = plt.gca()
-        sns.violinplot(data=fold_scores, inner=None, color="skyblue", ax=ax)
-        sns.stripplot(data=fold_scores, color="black", size=6, jitter=False, ax=ax)
 
-        ax.axhline(mean_s, ls="--", lw=2, color="red",
-                   label=f"μ={mean_s:.2f}±{sd_s:.2f}")
-        ax.axhspan(ci_low, ci_high, color="red", alpha=0.15,
-                   label=f"95 % boot CI [{ci_low:.2f}, {ci_high:.2f}]")
+        # violin
+        sns.violinplot(y=fold_scores,
+                       inner=None, cut=0,
+                       bw=0.25, width=0.6,
+                       color="#83b5d1", ax=ax)
 
-        # optional null thresholds (OG or gold)
-        for tag, style in [("null_95th_percentile.npy", (":", "α=0.05")),
-                           ("gold_null95.npy", (":", "α=0.05 (gold)")),
-                           ("null_50th_percentile.npy", ("--", "Null mean")),
-                           ("gold_null50.npy", ("--", "Null mean (gold)"))]:
-            f = os.path.join(self.run_directory, tag)
-            if os.path.exists(f):
-                val = float(np.load(f))
-                ax.axhline(val, ls=style[0], lw=2,
-                           color="black" if ':' in style[0] else "grey",
-                           label=f"{style[1]} ({val:.2f})")
+        # individual folds
+        sns.stripplot(y=fold_scores,
+                      color="white", edgecolor="black",
+                      size=8, jitter=False, ax=ax, zorder=3)
 
-        ax.set_ylabel("Macro‑F1 (outer fold)")
+        # mean ± SD
+        ax.axhline(mean_s, ls="--", lw=2, color="crimson",
+                   label=f"mean ± SD  {mean_s:.2f} ± {sd_s:.2f}")
+        ax.axhspan(ci_low, ci_high, color="crimson", alpha=0.15,
+                   label=f"95 % bootstrap CI [{ci_low:.2f}, {ci_high:.2f}]")
+
+        # reference lines
+        ax.axhline(0.50, ls=":", lw=2, color="gray", label="chance = 0.50")
+        ax.axhline(0.585, ls=":", lw=2, color="black", label="theor. 95 % = 0.585")
+
+        # cosmetics
+        ax.set_ylabel("Macro-F1 (outer fold)")
         ax.set_title(f"{best_name} – distribution across {fold_scores.size} outer folds")
         ax.set_ylim(0, 1)
-        ax.legend()
+        ax.set_xticks([])
+        ax.legend(frameon=False, loc="upper left", fontsize=8)
+
         out_png = f"{self.run_directory}/outer_fold_f1_distribution.png"
-        plt.tight_layout();
-        plt.savefig(out_png, dpi=300, bbox_inches="tight");
+        plt.tight_layout()
+        plt.savefig(out_png, dpi=300, bbox_inches="tight")
         plt.close()
-        print_log(f"Saved violin plot → {out_png}")
-
-
+        print_log(f"✓ Saved violin plot → {out_png}")
 
     # NESTED CV without Bayes --> removed
     # def run_nested_cv_fixed(self, models=None):
@@ -2615,6 +2612,7 @@ class EEGAnalyzer:
             self.best_labels=('m_et_s', 'n_3_s')
         df_best = self.df[self.df["label"].isin(self.best_labels)].reset_index(drop=True)
         X_all = df_best[self.feature_columns]
+
         y_all = df_best["label"]
         groups = df_best["session"].values
 
@@ -4032,10 +4030,10 @@ class EEGAnalyzer:
         # main pipeline we have right now
         else: # run nested-cv without bayesian with gold standard permuation
             self.run_true_nested_cv()  # chooses the heuristic winner
+            self.plot_outer_fold_distribution()
+            self.visualize_confusion_matrix()
             if self.permu_count!=0:
                 self.permutation_test_final_true_cv_gold()
-                self.plot_outer_fold_distribution()
-                self.visualize_confusion_matrix()
             # these are not relevant for this section
             # self.visualize_pca()
             # self.visualize_pca_3d()
