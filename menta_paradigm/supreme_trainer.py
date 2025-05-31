@@ -64,7 +64,7 @@ class SupremeTrainer:
         kfold_splits=5,
         lmoso_leftout=2,
         permu_count=1000,
-        data_path="final_final_set/",
+        data_path="final_final_set/supremes/",
         random_state=42,
         n_iter=10,
     ):
@@ -113,10 +113,11 @@ class SupremeTrainer:
         )
         self.run_directory = os.path.join(
             "supreme_model_outputs",
-            f"entropy_alpha({self.alpha_conf})_{chan_models_str}_{cv_method}_{n_iter}BO_{permu_count_str}Permu_run_{timestamp}",
+            f"entropy_alpha(Permu_run_{timestamp}",
         )
         os.makedirs(self.run_directory, exist_ok=True)
-
+        with open(self.run_directory+'models.txt', 'w') as f:
+            f.write(f"{self.alpha_conf})_{chan_models_str}_{cv_method}_{n_iter}BO_{permu_count_str}")
         # Initialize data structures
         self.channel_data = {}  # Will hold DataFrames for each channel
         self.feature_columns = {}  # Will store feature columns for each channel
@@ -1343,6 +1344,77 @@ class SupremeTrainer:
 
         print_log(self, f"Saved confusion matrices → {out_png}")
 
+    def plot_disagreement_heatmap(self):
+        """
+        Visualize disagreements and agreements across channels for each sample.
+        """
+        if not hasattr(self, "evaluation_results"):
+            print_log(self, "Run the evaluation first.")
+            return
+
+        print_log(self, "---- PLOTTING DISAGREEMENT HEATMAP ----")
+
+        channels = list(self.channels_models.keys())
+
+        # Discover common fold tags for which all channels have predictions
+        tags_per_channel = []
+        for ch in channels:
+            ch_tags = {
+                fn[len(ch) + 1: -11]  # strip "<ch>_" … "_preds.json"
+                for fn in os.listdir(self.fold_predictions_dir)
+                if fn.startswith(f"{ch}_") and fn.endswith("_preds.json")
+            }
+            tags_per_channel.append(ch_tags)
+
+        common_tags = sorted(set.intersection(*tags_per_channel))
+        if not common_tags:
+            print_log(self, "No common fold predictions found.")
+            return
+
+        sample_rows = []
+        for tag in common_tags:
+            fold_preds, fold_true = {}, None
+            for ch in channels:
+                path = os.path.join(self.fold_predictions_dir, f"{ch}_{tag}_preds.json")
+                with open(path, "r") as f:
+                    pdict = json.load(f)
+                if fold_true is None:
+                    fold_true = np.asarray(pdict["y_true"])
+                fold_preds[ch] = np.asarray(pdict["y_pred"])
+
+            for i in range(len(fold_true)):
+                row = {"true_label": fold_true[i]}
+                for ch in channels:
+                    row[ch] = fold_preds[ch][i] == fold_true[i]  # Correct? (True/False)
+                sample_rows.append(row)
+
+        df = pd.DataFrame(sample_rows)
+
+        # Convert to 0 (wrong) and 1 (correct) for heatmap
+        heatmap_data = df[channels].astype(int)
+
+        plt.figure(figsize=(10, 20))
+        from matplotlib.colors import ListedColormap
+        custom_cmap = ListedColormap(["red", "green"])
+        sns.heatmap(
+            heatmap_data,
+            cmap=custom_cmap,
+            cbar=False,
+            linewidths=0.1,
+            linecolor="gray",
+        )
+
+        plt.xlabel("Channel")
+        plt.ylabel("Sample")
+        plt.title("Channels Correctness on Disagreement Samples")
+
+        out_path = os.path.join(self.run_directory, "disagreement_samples_heatmap.png")
+        plt.tight_layout()
+        plt.savefig(out_path, dpi=300)
+        plt.close()
+
+        print_log(self, f"Saved disagreement heatmap → {out_path}")
+
     # ---------------------------------------------------------------------------
     #   Robust to both LOSO / LMOSO (session tags) and k‑fold (foldX tags)
     # ---------------------------------------------------------------------------
@@ -1484,7 +1556,7 @@ class SupremeTrainer:
         # Step 4: Visualization
         self.plot_confusion_matrices()
         self.plot_per_sample_agreement()
-
+        self.plot_disagreement_heatmap()
         # Step 5: Generate final report
         self._generate_final_report(
             evaluation_results, permutation_results, bootstrap_results
@@ -1669,7 +1741,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--data_path",
         type=str,
-        default="data/final_sets/all_channels_binary",
+        default="data/final_sets/all_channels_binary/",
         help="Path to directory containing channel data files",
     )
     parser.add_argument(

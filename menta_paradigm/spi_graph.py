@@ -71,12 +71,12 @@ for i, (start_idx, dur_ms) in enumerate(zip(seg_starts[:-1], durations_ms)):
     plt.text(t_mid, 0.55, f"{dur_ms} ms", ha='center', va='bottom', fontsize=12, fontweight='bold', rotation=90, alpha=0.8)
 
 # SPI annotation box
-plt.text(0.02, 0.87, spi_text, transform=plt.gca().transAxes,
-         fontsize=18, fontweight='bold', bbox=dict(facecolor='white', edgecolor='black', boxstyle='round'))
+plt.text(0.10, 0.9, spi_text, transform=plt.gca().transAxes,
+         fontsize=20, fontweight='bold', bbox=dict(facecolor='white', edgecolor='black', boxstyle='round'))
 
-plt.title('Alpha-Band Envelope and SPI Run Durations')
-plt.xlabel('Time (s)')
-plt.ylabel('Amplitude')
+plt.title('Alpha-Band Envelope and SPI Run Durations', fontsize=20)
+plt.xlabel('Time (s)', fontsize=20)
+plt.ylabel('Amplitude', fontsize=20)
 plt.legend()
 plt.tight_layout()
 plt.show()
