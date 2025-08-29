@@ -826,7 +826,11 @@ def feat_spi_state1_alpha(signal, sfreq): return _spi_states_k(signal, sfreq, 8,
 def feat_spi_state2_alpha(signal, sfreq): return _spi_states_k(signal, sfreq, 8, 13, 2)
 def feat_spi_state3_alpha(signal, sfreq): return _spi_states_k(signal, sfreq, 8, 13, 3)
 
-
+# Beta band SPI-States
+def feat_spi_state0_beta(signal, sfreq): return _spi_states_k(signal, sfreq, 13, 30, 0)
+def feat_spi_state1_beta(signal, sfreq): return _spi_states_k(signal, sfreq, 13, 30, 1)
+def feat_spi_state2_beta(signal, sfreq): return _spi_states_k(signal, sfreq, 13, 30, 2)
+def feat_spi_state3_beta(signal, sfreq): return _spi_states_k(signal, sfreq, 13, 30, 3)
 
 
 # ---------------------------
@@ -901,6 +905,12 @@ def register_all_features(extractor):
     extractor.register_feature('spi_state1_alpha', feat_spi_state1_alpha)
     extractor.register_feature('spi_state2_alpha', feat_spi_state2_alpha)
     extractor.register_feature('spi_state3_alpha', feat_spi_state3_alpha)
+
+    # --- SPI-States (beta) ---
+    extractor.register_feature('spi_state0_beta', feat_spi_state0_beta)
+    extractor.register_feature('spi_state1_beta', feat_spi_state1_beta)
+    extractor.register_feature('spi_state2_beta', feat_spi_state2_beta)
+    extractor.register_feature('spi_state3_beta', feat_spi_state3_beta)
 
 
 # ---------------------------
