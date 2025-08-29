@@ -616,42 +616,36 @@ def feat_energy_ratio(signal, sfreq):
     return energy_second / energy_first if energy_first > 0 else np.nan
 
 
-# EEG microstate features (simplified version)
-def feat_proxy_microstate_variance(signal, sfreq):
-    """
-    Calculate a simplified measure of EEG microstate variability.
+# SPI HELPERS
+# ===== SPI helpers =====
+def _band_envelope(signal, sfreq, l_freq, h_freq):
+    """Band-pass then Hilbert envelope."""
+    sig_f = mne.filter.filter_data(signal[np.newaxis, :],
+                                   sfreq=sfreq, l_freq=l_freq, h_freq=h_freq,
+                                   verbose=False)[0]
+    env = np.abs(hilbert(sig_f))
+    return env
 
-    True microstate analysis requires spatial information across multiple channels.
-    This is a simplified proxy using temporal segmentation.
-    """
-    # Filter signal to alpha band which is relevant for visual processing
-    filtered_signal = mne.filter.filter_data(
-        signal.reshape(1, -1),
-        sfreq=sfreq,
-        l_freq=8,
-        h_freq=13,
-        verbose=False
-    )[0]
+def _run_lengths(labels):
+    """Run lengths of a 1D integer label array."""
+    if labels.size == 0:
+        return np.array([], dtype=int)
+    switches = np.flatnonzero(np.diff(labels)) + 1
+    seg_edges = np.r_[0, switches, labels.size]
+    return np.diff(seg_edges)
 
-    # Create a simple proxy for microstates using signal amplitude
-    # Real microstate analysis would use spatial patterns across channels
-    median_val = np.median(filtered_signal)
-    states = (filtered_signal > median_val).astype(int)
-
-    # Calculate mean duration of each "state"
-    state_changes = np.diff(states)
-    change_indices = np.where(state_changes != 0)[0]
-
-    if len(change_indices) < 2:
+def _cv_or_nan(lengths):
+    """Coefficient of variation (population version), NaN if <2 runs."""
+    if lengths is None or len(lengths) < 2:
         return np.nan
+    mu = np.mean(lengths)
+    if mu == 0:
+        return np.nan
+    sigma = np.std(lengths)  # ddof=0
+    return sigma / mu
 
-    durations = np.diff(np.append(0, np.append(change_indices, len(states))))
 
-    # Return the coefficient of variation (std/mean) of durations
-    mean_duration = np.mean(durations)
-    std_duration = np.std(durations)
-
-    return std_duration / mean_duration if mean_duration > 0 else np.nan
+''' OLD SPI implementation
 
 def feat_spi_theta(signal, sfreq, l_freq=4, h_freq=8):
     """
@@ -780,6 +774,58 @@ def feat_spi_beta(signal, sfreq, l_freq=13, h_freq=30):
     # 4. Coefficient of variation
     mu, sigma = durations.mean(), durations.std()
     return sigma / mu if mu else np.nan
+    
+'''
+
+def feat_spi_theta(signal, sfreq, l_freq=4, h_freq=8):
+    env = _band_envelope(signal, sfreq, l_freq, h_freq)
+    states = (env > np.median(env)).astype(np.int8)
+    lengths = _run_lengths(states)
+    return _cv_or_nan(lengths)
+
+def feat_spi_alpha(signal, sfreq, l_freq=8, h_freq=13):
+    env = _band_envelope(signal, sfreq, l_freq, h_freq)
+    states = (env > np.median(env)).astype(np.int8)
+    lengths = _run_lengths(states)
+    return _cv_or_nan(lengths)
+
+def feat_spi_beta(signal, sfreq, l_freq=13, h_freq=30):
+    env = _band_envelope(signal, sfreq, l_freq, h_freq)
+    states = (env > np.median(env)).astype(np.int8)
+    lengths = _run_lengths(states)
+    return _cv_or_nan(lengths)
+
+def _spi_states_k(signal, sfreq, l_freq, h_freq, k):
+    env = _band_envelope(signal, sfreq, l_freq, h_freq)
+    Q1, Q2, Q3 = np.quantile(env, [0.25, 0.5, 0.75])
+    # assign state labels
+    s = np.empty(env.shape, dtype=np.int8)
+    s[env <= Q1] = 0
+    s[(env > Q1) & (env <= Q2)] = 1
+    s[(env > Q2) & (env <= Q3)] = 2
+    s[env > Q3] = 3
+    # collect run lengths for state k
+    lengths_k = []
+    switches = np.flatnonzero(np.diff(s)) + 1
+    starts = np.r_[0, switches]
+    ends = np.r_[switches, s.size]
+    for st, en in zip(starts, ends):
+        if s[st] == k:
+            lengths_k.append(en - st)
+    return _cv_or_nan(lengths_k)
+
+# Theta band SPI-States
+def feat_spi_state0_theta(signal, sfreq): return _spi_states_k(signal, sfreq, 4, 8, 0)
+def feat_spi_state1_theta(signal, sfreq): return _spi_states_k(signal, sfreq, 4, 8, 1)
+def feat_spi_state2_theta(signal, sfreq): return _spi_states_k(signal, sfreq, 4, 8, 2)
+def feat_spi_state3_theta(signal, sfreq): return _spi_states_k(signal, sfreq, 4, 8, 3)
+
+# Alpha band SPI-States
+def feat_spi_state0_alpha(signal, sfreq): return _spi_states_k(signal, sfreq, 8, 13, 0)
+def feat_spi_state1_alpha(signal, sfreq): return _spi_states_k(signal, sfreq, 8, 13, 1)
+def feat_spi_state2_alpha(signal, sfreq): return _spi_states_k(signal, sfreq, 8, 13, 2)
+def feat_spi_state3_alpha(signal, sfreq): return _spi_states_k(signal, sfreq, 8, 13, 3)
+
 
 
 
@@ -834,10 +880,28 @@ def register_all_features(extractor):
     # extractor.register_feature('psd_gamma_high', feat_psd_gamma_high)# >30Hz /canceled out in our freq. spectrum
     extractor.register_feature('dfa', feat_dfa)
     extractor.register_feature('energy_ratio', feat_energy_ratio)
-    # extractor.register_feature('proxy_microstate_var', feat_proxy_microstate_variance)
-    extractor.register_feature('state_pers_irr_theta', feat_spi_theta)
-    extractor.register_feature('state_pers_irr_alpha', feat_spi_alpha)
-    extractor.register_feature('state_pers_irr_beta', feat_spi_beta)
+
+    #SPI Metrics
+    # extractor.register_feature('state_pers_irr_theta', feat_spi_theta)
+    # extractor.register_feature('state_pers_irr_alpha', feat_spi_alpha)
+    # extractor.register_feature('state_pers_irr_beta', feat_spi_beta)
+    # --- SPI-50 ---
+    extractor.register_feature('spi50_theta', feat_spi_theta)
+    extractor.register_feature('spi50_alpha', feat_spi_alpha)
+    extractor.register_feature('spi50_beta',  feat_spi_beta)
+
+    # --- SPI-States (theta) ---
+    extractor.register_feature('spi_state0_theta', feat_spi_state0_theta)
+    extractor.register_feature('spi_state1_theta', feat_spi_state1_theta)
+    extractor.register_feature('spi_state2_theta', feat_spi_state2_theta)
+    extractor.register_feature('spi_state3_theta', feat_spi_state3_theta)
+
+    # --- SPI-States (alpha) ---
+    extractor.register_feature('spi_state0_alpha', feat_spi_state0_alpha)
+    extractor.register_feature('spi_state1_alpha', feat_spi_state1_alpha)
+    extractor.register_feature('spi_state2_alpha', feat_spi_state2_alpha)
+    extractor.register_feature('spi_state3_alpha', feat_spi_state3_alpha)
+
 
 # ---------------------------
 # Function to process a single file
