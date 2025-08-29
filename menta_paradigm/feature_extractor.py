@@ -617,42 +617,82 @@ def feat_energy_ratio(signal, sfreq):
 
 
 # SPI HELPERS
-# ===== SPI helpers =====
-def _band_envelope(signal, sfreq, l_freq, h_freq):
-    """Band-pass then Hilbert envelope."""
-    sig_f = mne.filter.filter_data(signal[np.newaxis, :],
-                                   sfreq=sfreq, l_freq=l_freq, h_freq=h_freq,
-                                   verbose=False)[0]
-    env = np.abs(hilbert(sig_f))
-    return env
+# ---- Waveform-based SPI-States (quartiles on the band-passed waveform) ----
 
-def _run_lengths(labels):
-    """Run lengths of a 1D integer label array."""
-    if labels.size == 0:
-        return np.array([], dtype=int)
-    switches = np.flatnonzero(np.diff(labels)) + 1
-    seg_edges = np.r_[0, switches, labels.size]
-    return np.diff(seg_edges)
+def _bandpass(signal, sfreq, l_freq, h_freq):
+    return mne.filter.filter_data(signal[np.newaxis, :],
+                                  sfreq=sfreq, l_freq=l_freq, h_freq=h_freq,
+                                  verbose=False)[0]
 
-def _cv_or_nan(lengths):
-    """Coefficient of variation (population version), NaN if <2 runs."""
-    if lengths is None or len(lengths) < 2:
+def _label_runs_quartiles_waveform(sig_f):
+    """Label samples 0..3 using quartiles on the *waveform* values."""
+    Q1, Q2, Q3 = np.quantile(sig_f, [0.25, 0.50, 0.75])
+    s = np.empty(sig_f.shape, dtype=np.int8)
+    s[sig_f <= Q1] = 0
+    s[(sig_f > Q1) & (sig_f <= Q2)] = 1
+    s[(sig_f > Q2) & (sig_f <= Q3)] = 2
+    s[sig_f > Q3] = 3
+    return s
+
+def _merge_short_runs(labels, min_len=0):
+    """
+    Optional: merge runs shorter than min_len into the adjacent run
+    to suppress 1-sample chattering typical of raw waveforms.
+    Set min_len=0 to disable (exact definition).
+    """
+    if min_len <= 1:
+        return labels
+    labs = labels.copy()
+    sw = np.flatnonzero(np.diff(labs)) + 1
+    edges = np.r_[0, sw, labs.size]
+    lengths = np.diff(edges)
+    starts = edges[:-1]
+    # Walk runs; if too short, assign to the longer neighbor
+    for i, (st, ln) in enumerate(zip(starts, lengths)):
+        if ln >= min_len:
+            continue
+        left_ok  = i > 0
+        right_ok = i < len(lengths) - 1
+        if not (left_ok or right_ok):
+            continue
+        # choose neighbor with longer run (ties -> right)
+        if left_ok and right_ok:
+            choose_right = lengths[i+1] >= lengths[i-1]
+        else:
+            choose_right = right_ok
+        tgt = starts[i+1] if choose_right else starts[i-1]
+        labs[st:st+ln] = labs[tgt]
+    return labs
+
+def _spi_states_waveform_cv_k(signal, sfreq, l_freq, h_freq, k, min_run_samples=0):
+    """
+    SPI-States on *waveform*: quartile states of band-passed waveform,
+    then CV of run-lengths for state k (0..3).
+    """
+    sig_f = _bandpass(signal, sfreq, l_freq, h_freq)
+    s = _label_runs_quartiles_waveform(sig_f)
+    if min_run_samples > 1:
+        s = _merge_short_runs(s, min_len=min_run_samples)
+
+    # collect run lengths for state k
+    switches = np.flatnonzero(np.diff(s)) + 1
+    starts = np.r_[0, switches]
+    ends   = np.r_[switches, s.size]
+    lengths_k = [en - st for st, en in zip(starts, ends) if s[st] == k]
+
+    if len(lengths_k) < 2:
         return np.nan
-    mu = np.mean(lengths)
+    mu = float(np.mean(lengths_k))
     if mu == 0:
         return np.nan
-    sigma = np.std(lengths)  # ddof=0
-    return sigma / mu
-
-
-''' OLD SPI implementation
+    return float(np.std(lengths_k) / mu)  # population std
 
 def feat_spi_theta(signal, sfreq, l_freq=4, h_freq=8):
     """
     Compute the theta-band State-Persistence Irregularity (SPI).
 
     SPI = σ_d / μ_d, where d_i are consecutive run-lengths of a binary
-    state sequence obtained by median-splitting the theta-band envelope.
+    state sequence obtained by median-splitting the theta-band waveform.
     A high SPI denotes irregular switching; a low SPI denotes uniform,
     microstate-like epochs.
 
@@ -694,7 +734,7 @@ def feat_spi_alpha(signal, sfreq, l_freq=8, h_freq=13):
     Compute the alpha-band State-Persistence Irregularity (SPI).
 
     SPI = σ_d / μ_d, where d_i are consecutive run-lengths of a binary
-    state sequence obtained by median-splitting the alpha-band envelope.
+    state sequence obtained by median-splitting the alpha-band waveform.
     A high SPI denotes irregular switching; a low SPI denotes uniform,
     microstate-like epochs.
 
@@ -736,7 +776,7 @@ def feat_spi_beta(signal, sfreq, l_freq=13, h_freq=30):
     Compute the beta-band State-Persistence Irregularity (SPI).
 
     SPI = σ_d / μ_d, where d_i are consecutive run-lengths of a binary
-    state sequence obtained by median-splitting the beta-band envelope.
+    state sequence obtained by median-splitting the beta-band wavefor.
     A high SPI denotes irregular switching; a low SPI denotes uniform,
     microstate-like epochs.
 
@@ -764,8 +804,6 @@ def feat_spi_beta(signal, sfreq, l_freq=13, h_freq=30):
 
     # 3. Run-length encoding
     switches = np.diff(states).nonzero()[0] + 1
-    print (len(switches))
-    input()
     if switches.size < 1:
         return np.nan
     seg_starts = np.r_[0, switches, states.size]
@@ -775,62 +813,28 @@ def feat_spi_beta(signal, sfreq, l_freq=13, h_freq=30):
     mu, sigma = durations.mean(), durations.std()
     return sigma / mu if mu else np.nan
     
-'''
 
-def feat_spi_theta(signal, sfreq, l_freq=4, h_freq=8):
-    env = _band_envelope(signal, sfreq, l_freq, h_freq)
-    states = (env > np.median(env)).astype(np.int8)
-    lengths = _run_lengths(states)
-    return _cv_or_nan(lengths)
 
-def feat_spi_alpha(signal, sfreq, l_freq=8, h_freq=13):
-    env = _band_envelope(signal, sfreq, l_freq, h_freq)
-    states = (env > np.median(env)).astype(np.int8)
-    lengths = _run_lengths(states)
-    return _cv_or_nan(lengths)
+# Theta (4–8 Hz)
+def feat_spi_state0_theta_wave(signal, sfreq): return _spi_states_waveform_cv_k(signal, sfreq, 4, 8, 0)
+def feat_spi_state1_theta_wave(signal, sfreq): return _spi_states_waveform_cv_k(signal, sfreq, 4, 8, 1)
+def feat_spi_state2_theta_wave(signal, sfreq): return _spi_states_waveform_cv_k(signal, sfreq, 4, 8, 2)
+def feat_spi_state3_theta_wave(signal, sfreq): return _spi_states_waveform_cv_k(signal, sfreq, 4, 8, 3)
 
-def feat_spi_beta(signal, sfreq, l_freq=13, h_freq=30):
-    env = _band_envelope(signal, sfreq, l_freq, h_freq)
-    states = (env > np.median(env)).astype(np.int8)
-    lengths = _run_lengths(states)
-    return _cv_or_nan(lengths)
+# Alpha (8–13 Hz)
+def feat_spi_state0_alpha_wave(signal, sfreq): return _spi_states_waveform_cv_k(signal, sfreq, 8, 13, 0)
+def feat_spi_state1_alpha_wave(signal, sfreq): return _spi_states_waveform_cv_k(signal, sfreq, 8, 13, 1)
+def feat_spi_state2_alpha_wave(signal, sfreq): return _spi_states_waveform_cv_k(signal, sfreq, 8, 13, 2)
+def feat_spi_state3_alpha_wave(signal, sfreq): return _spi_states_waveform_cv_k(signal, sfreq, 8, 13, 3)
 
-def _spi_states_k(signal, sfreq, l_freq, h_freq, k):
-    env = _band_envelope(signal, sfreq, l_freq, h_freq)
-    Q1, Q2, Q3 = np.quantile(env, [0.25, 0.5, 0.75])
-    # assign state labels
-    s = np.empty(env.shape, dtype=np.int8)
-    s[env <= Q1] = 0
-    s[(env > Q1) & (env <= Q2)] = 1
-    s[(env > Q2) & (env <= Q3)] = 2
-    s[env > Q3] = 3
-    # collect run lengths for state k
-    lengths_k = []
-    switches = np.flatnonzero(np.diff(s)) + 1
-    starts = np.r_[0, switches]
-    ends = np.r_[switches, s.size]
-    for st, en in zip(starts, ends):
-        if s[st] == k:
-            lengths_k.append(en - st)
-    return _cv_or_nan(lengths_k)
+# Beta (13–30 Hz) – optional
+def feat_spi_state0_beta_wave(signal, sfreq): return _spi_states_waveform_cv_k(signal, sfreq, 13, 30, 0)
+def feat_spi_state1_beta_wave(signal, sfreq): return _spi_states_waveform_cv_k(signal, sfreq, 13, 30, 1)
+def feat_spi_state2_beta_wave(signal, sfreq): return _spi_states_waveform_cv_k(signal, sfreq, 13, 30, 2)
+def feat_spi_state3_beta_wave(signal, sfreq): return _spi_states_waveform_cv_k(signal, sfreq, 13, 30, 3)
 
-# Theta band SPI-States
-def feat_spi_state0_theta(signal, sfreq): return _spi_states_k(signal, sfreq, 4, 8, 0)
-def feat_spi_state1_theta(signal, sfreq): return _spi_states_k(signal, sfreq, 4, 8, 1)
-def feat_spi_state2_theta(signal, sfreq): return _spi_states_k(signal, sfreq, 4, 8, 2)
-def feat_spi_state3_theta(signal, sfreq): return _spi_states_k(signal, sfreq, 4, 8, 3)
 
-# Alpha band SPI-States
-def feat_spi_state0_alpha(signal, sfreq): return _spi_states_k(signal, sfreq, 8, 13, 0)
-def feat_spi_state1_alpha(signal, sfreq): return _spi_states_k(signal, sfreq, 8, 13, 1)
-def feat_spi_state2_alpha(signal, sfreq): return _spi_states_k(signal, sfreq, 8, 13, 2)
-def feat_spi_state3_alpha(signal, sfreq): return _spi_states_k(signal, sfreq, 8, 13, 3)
 
-# Beta band SPI-States
-def feat_spi_state0_beta(signal, sfreq): return _spi_states_k(signal, sfreq, 13, 30, 0)
-def feat_spi_state1_beta(signal, sfreq): return _spi_states_k(signal, sfreq, 13, 30, 1)
-def feat_spi_state2_beta(signal, sfreq): return _spi_states_k(signal, sfreq, 13, 30, 2)
-def feat_spi_state3_beta(signal, sfreq): return _spi_states_k(signal, sfreq, 13, 30, 3)
 
 
 # ---------------------------
@@ -840,22 +844,22 @@ def register_all_features(extractor):
     """Register all feature extraction functions to the extractor."""
 
     # Register Basic Statistical Features
-    extractor.register_feature('mean', feat_mean)
-    extractor.register_feature('median', feat_median)
-    extractor.register_feature('variance', feat_variance)
-    extractor.register_feature('std', feat_std)
-    extractor.register_feature('skewness', feat_skewness)
-    extractor.register_feature('kurtosis', feat_kurtosis)
-    extractor.register_feature('zcr', feat_zero_crossing_rate)
-    extractor.register_feature('energy', feat_energy)
-    extractor.register_feature('ptp', feat_peak_to_peak)
+    # extractor.register_feature('mean', feat_mean)
+    # extractor.register_feature('median', feat_median)
+    # extractor.register_feature('variance', feat_variance)
+    # extractor.register_feature('std', feat_std)
+    # extractor.register_feature('skewness', feat_skewness)
+    # extractor.register_feature('kurtosis', feat_kurtosis)
+    # extractor.register_feature('zcr', feat_zero_crossing_rate)
+    # extractor.register_feature('energy', feat_energy)
+    # extractor.register_feature('ptp', feat_peak_to_peak)
 
     # Register Frequency Domain Features
     extractor.register_feature('psd_delta', feat_psd_delta)
     extractor.register_feature('psd_theta', feat_psd_theta)
     extractor.register_feature('psd_alpha', feat_psd_alpha)
     extractor.register_feature('psd_beta', feat_psd_beta)
-    extractor.register_feature('total_power', feat_total_power)
+    # extractor.register_feature('total_power', feat_total_power)
     extractor.register_feature('rel_alpha', feat_relative_alpha)
     extractor.register_feature('ratio_theta_alpha', feat_ratio_theta_alpha)
     extractor.register_feature('ratio_beta_alpha', feat_ratio_beta_alpha)
@@ -867,11 +871,11 @@ def register_all_features(extractor):
     extractor.register_feature('higuchi_fd', feat_higuchi_fd)
 
     # Register Additional Features for Visual Imagery
-    extractor.register_feature('hjorth_activity', feat_hjorth_activity)
-    extractor.register_feature('hjorth_mobility', feat_hjorth_mobility)
-    extractor.register_feature('hjorth_complexity', feat_hjorth_complexity)
+    # extractor.register_feature('hjorth_activity', feat_hjorth_activity)
+    # extractor.register_feature('hjorth_mobility', feat_hjorth_mobility)
+    # extractor.register_feature('hjorth_complexity', feat_hjorth_complexity)
     extractor.register_feature('spectral_entropy', feat_spectral_entropy)
-    extractor.register_feature('lempel_ziv', feat_lempel_ziv)
+    # extractor.register_feature('lempel_ziv', feat_lempel_ziv)
 
     # Register New Visual Imagery Specific Features
     extractor.register_feature('self_phase_locking_value', feat_self_phase_locking_value)
@@ -883,7 +887,7 @@ def register_all_features(extractor):
     # extractor.register_feature('psd_gamma_low', feat_psd_gamma_low) #>30Hz /canceled out in our freq. spectrum
     # extractor.register_feature('psd_gamma_high', feat_psd_gamma_high)# >30Hz /canceled out in our freq. spectrum
     extractor.register_feature('dfa', feat_dfa)
-    extractor.register_feature('energy_ratio', feat_energy_ratio)
+    # extractor.register_feature('energy_ratio', feat_energy_ratio)
 
     #SPI Metrics
     # extractor.register_feature('state_pers_irr_theta', feat_spi_theta)
@@ -894,23 +898,23 @@ def register_all_features(extractor):
     extractor.register_feature('spi50_alpha', feat_spi_alpha)
     extractor.register_feature('spi50_beta',  feat_spi_beta)
 
-    # --- SPI-States (theta) ---
-    extractor.register_feature('spi_state0_theta', feat_spi_state0_theta)
-    extractor.register_feature('spi_state1_theta', feat_spi_state1_theta)
-    extractor.register_feature('spi_state2_theta', feat_spi_state2_theta)
-    extractor.register_feature('spi_state3_theta', feat_spi_state3_theta)
+    # SPI-States (waveform) – theta
+    extractor.register_feature('spi_state0_theta_wave', feat_spi_state0_theta_wave)
+    extractor.register_feature('spi_state1_theta_wave', feat_spi_state1_theta_wave)
+    extractor.register_feature('spi_state2_theta_wave', feat_spi_state2_theta_wave)
+    extractor.register_feature('spi_state3_theta_wave', feat_spi_state3_theta_wave)
 
-    # --- SPI-States (alpha) ---
-    extractor.register_feature('spi_state0_alpha', feat_spi_state0_alpha)
-    extractor.register_feature('spi_state1_alpha', feat_spi_state1_alpha)
-    extractor.register_feature('spi_state2_alpha', feat_spi_state2_alpha)
-    extractor.register_feature('spi_state3_alpha', feat_spi_state3_alpha)
+    # SPI-States (waveform) – alpha
+    extractor.register_feature('spi_state0_alpha_wave', feat_spi_state0_alpha_wave)
+    extractor.register_feature('spi_state1_alpha_wave', feat_spi_state1_alpha_wave)
+    extractor.register_feature('spi_state2_alpha_wave', feat_spi_state2_alpha_wave)
+    extractor.register_feature('spi_state3_alpha_wave', feat_spi_state3_alpha_wave)
 
-    # --- SPI-States (beta) ---
-    extractor.register_feature('spi_state0_beta', feat_spi_state0_beta)
-    extractor.register_feature('spi_state1_beta', feat_spi_state1_beta)
-    extractor.register_feature('spi_state2_beta', feat_spi_state2_beta)
-    extractor.register_feature('spi_state3_beta', feat_spi_state3_beta)
+    # (optional) SPI-States (waveform) – beta
+    extractor.register_feature('spi_state0_beta_wave', feat_spi_state0_beta_wave)
+    extractor.register_feature('spi_state1_beta_wave', feat_spi_state1_beta_wave)
+    extractor.register_feature('spi_state2_beta_wave', feat_spi_state2_beta_wave)
+    extractor.register_feature('spi_state3_beta_wave', feat_spi_state3_beta_wave)
 
 
 # ---------------------------
